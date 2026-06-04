@@ -13,12 +13,21 @@ from app.plugins import _PluginBase
 from app.schemas import NotificationType, WebhookEventInfo
 from app.schemas.types import EventType
 
+# 可选导入 watchdog，如果没有安装则使用延迟回退方案
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler, FileSystemEvent
+    _WATCHDOG_AVAILABLE = True
+except ImportError:
+    _WATCHDOG_AVAILABLE = False
+    logger.warning("watchdog 库未安装，名称搜索将使用固定延迟模式（建议安装 watchdog 以获得更好的硬盘保护）")
+
 
 class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -54,6 +63,9 @@ class EmbyDeleteGuard(_PluginBase):
     _name_search_enabled = True
     _name_search_max_depth = 4
     _name_search_max_results = 80
+    _name_search_wait_for_cleaner = True
+    _name_search_watch_timeout = 600  # 10分钟超时
+    _name_search_cleaner_idle = 30  # 30秒无删除事件认为清理完成
     _clean_scrap = True
     _clean_empty_dirs = True
     _clean_media = False
@@ -79,6 +91,10 @@ class EmbyDeleteGuard(_PluginBase):
     _timers: List[threading.Timer] = []
     _recent_keys: Dict[str, float] = {}
     _lock = threading.Lock()
+    
+    # 文件系统监控器
+    _observer: Optional[Observer] = None
+    _observer_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -94,6 +110,9 @@ class EmbyDeleteGuard(_PluginBase):
             self._name_search_enabled = bool(config.get("name_search_enabled", True))
             self._name_search_max_depth = int(config.get("name_search_max_depth") or 4)
             self._name_search_max_results = int(config.get("name_search_max_results") or 80)
+            self._name_search_wait_for_cleaner = bool(config.get("name_search_wait_for_cleaner", True))
+            self._name_search_watch_timeout = int(config.get("name_search_watch_timeout") or 600)
+            self._name_search_cleaner_idle = int(config.get("name_search_cleaner_idle") or 30)
             self._clean_scrap = bool(config.get("clean_scrap", True))
             self._clean_empty_dirs = bool(config.get("clean_empty_dirs", True))
             self._clean_media = bool(config.get("clean_media", False))
@@ -304,12 +323,27 @@ class EmbyDeleteGuard(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "name_search_max_depth", "label": "名称搜索最大深度", "type": "number", "placeholder": "4"}}]
+                                "content": [{"component": "VSwitch", "props": {"model": "name_search_wait_for_cleaner", "label": "等待清理插件完成后再搜索", "hint": "智能监控清理插件删除操作，完成后再执行名称搜索，保护硬盘，避免重复扫描"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "name_search_max_depth", "label": "名称搜索最大深度", "type": "number", "placeholder": "4"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
                                 "content": [{"component": "VTextField", "props": {"model": "name_search_max_results", "label": "名称搜索最大结果数", "type": "number", "placeholder": "80"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{"component": "VTextField", "props": {"model": "name_search_watch_timeout", "label": "监控超时秒数", "type": "number", "placeholder": "600", "hint": "最长等待清理插件的时间（秒），超时后仍执行名称搜索"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{"component": "VTextField", "props": {"model": "name_search_cleaner_idle", "label": "清理插件空闲判定秒数", "type": "number", "placeholder": "30", "hint": "无删除操作多少秒后认为清理完成"}}]
                             },
                             {
                                 "component": "VCol",
@@ -394,6 +428,9 @@ class EmbyDeleteGuard(_PluginBase):
             "reference_cleaner_plugins": True,
             "reference_enabled_only": True,
             "name_search_enabled": True,
+            "name_search_wait_for_cleaner": True,
+            "name_search_watch_timeout": 600,
+            "name_search_cleaner_idle": 30,
             "name_search_max_depth": 4,
             "name_search_max_results": 80,
             "path_mappings": "",
@@ -468,11 +505,19 @@ class EmbyDeleteGuard(_PluginBase):
 
     def _guard_cleanup(self, path: Path, item_name: str, event_type: str, channel: str, search_names: List[str] = None):
         try:
+            # 第一步：原路径复查
             result = self._inspect_residue(path)
+            
+            # 第二步：等待清理插件完成删除操作
             if self._name_search_enabled:
+                logger.info("等待清理插件删除操作完成后再执行名称搜索...")
+                self._wait_for_cleaner_idle()
+                # 第三步：名称搜索（兜底检查）
                 result["name_search_matches"] = self._search_by_media_names(search_names or [], path)
             else:
                 result["name_search_matches"] = []
+            
+            # 第四步：查找种子
             torrents = self._find_torrents(path)
             # 名称搜索命中的残留路径也参与种子匹配，避免只按原 path 漏掉。
             for matched_path in result.get("name_search_matches") or []:
@@ -905,6 +950,9 @@ class EmbyDeleteGuard(_PluginBase):
                 "name_search_enabled": self._name_search_enabled,
                 "name_search_max_depth": self._name_search_max_depth,
                 "name_search_max_results": self._name_search_max_results,
+                "name_search_wait_for_cleaner": self._name_search_wait_for_cleaner,
+                "name_search_watch_timeout": self._name_search_watch_timeout,
+                "name_search_cleaner_idle": self._name_search_cleaner_idle,
                 "path_mappings": self._path_mappings,
                 "clean_scrap": self._clean_scrap,
                 "clean_empty_dirs": self._clean_empty_dirs,
@@ -1103,3 +1151,77 @@ class EmbyDeleteGuard(_PluginBase):
                 return True
             self._recent_keys[key] = now
             return False
+    
+    def _wait_for_cleaner_idle(self) -> bool:
+        """监控清理插件路径，等待删除操作完成。返回 True 表示监控成功，False 表示超时或出错。"""
+        if not self._name_search_wait_for_cleaner:
+            return False
+        
+        # 检查 watchdog 是否可用
+        if not _WATCHDOG_AVAILABLE:
+            # 回退方案：使用固定延迟
+            logger.info(f"watchdog 未安装，使用固定延迟模式（等待 {self._name_search_cleaner_idle} 秒）")
+            time.sleep(self._name_search_cleaner_idle)
+            return True
+        
+        cleaner_roots = self._referenced_cleaner_roots()
+        if not cleaner_roots:
+            logger.debug("没有找到清理插件监控路径，跳过文件系统监控")
+            return False
+        
+        valid_roots = [Path(r) for r in cleaner_roots if Path(r).exists() and Path(r).is_dir()]
+        if not valid_roots:
+            logger.debug("清理插件监控路径不存在，跳过文件系统监控")
+            return False
+        
+        logger.info(f"启动文件系统监控，等待清理插件删除操作完成：{len(valid_roots)} 个路径")
+        
+        class CleanerIdleHandler(FileSystemEventHandler):
+            def __init__(self, idle_seconds: int):
+                self.last_delete_time = 0.0
+                self.idle_seconds = idle_seconds
+                self._lock = threading.Lock()
+            
+            def on_deleted(self, event: FileSystemEvent):
+                if not event.is_directory:
+                    with self._lock:
+                        self.last_delete_time = time.time()
+            
+            def is_idle(self) -> bool:
+                with self._lock:
+                    return (time.time() - self.last_delete_time) >= self.idle_seconds
+        
+        handler = CleanerIdleHandler(idle_seconds=self._name_search_cleaner_idle)
+        observer = Observer()
+        
+        try:
+            # 为每个清理路径添加监控
+            for root in valid_roots:
+                try:
+                    observer.schedule(handler, str(root), recursive=True)
+                except Exception as e:
+                    logger.warning(f"添加文件系统监控失败 {root}: {e}")
+            
+            observer.start()
+            
+            start_time = time.time()
+            while time.time() - start_time < self._name_search_watch_timeout:
+                time.sleep(5)  # 每5秒检查一次
+                if handler.is_idle():
+                    elapsed = int(time.time() - start_time)
+                    logger.info(f"清理插件删除操作已完成，等待了 {elapsed} 秒")
+                    return True
+            
+            elapsed = int(time.time() - start_time)
+            logger.warning(f"文件系统监控超时（{elapsed} 秒），清理插件可能仍在运行")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"文件系统监控失败：{e}")
+            return False
+        finally:
+            try:
+                observer.stop()
+                observer.join(timeout=5)
+            except Exception:
+                pass
