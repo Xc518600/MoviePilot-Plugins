@@ -1,0 +1,46 @@
+{
+  "EmbyQBLimit": {
+    "name": "Emby自动限速",
+    "description": "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复",
+    "labels": "媒体库,下载管理",
+    "version": "2.4",
+    "icon": "play_circle_outline.png",
+    "author": "老公",
+    "level": 1,
+    "v2": true,
+    "release": false,
+    "history": {
+      "v2.4": "修复：真实 Sessions 查询 API Key 占位符改为 [APIKEY]，并增加启用状态、服务选择、Sessions 查询状态日志",
+      "v2.3": "调整：插件显示名称改为 Emby自动限速",
+      "v2.2": "修复：停止使用继续观看列表判断播放状态，改为监听Webhook并查询真实Sessions，确保停止播放后恢复限速",
+      "v2.1": "优化：下载器和媒体服务器改为直接选择 MoviePilot 已配置服务，不再重复填写地址、账号和 API Key",
+      "v2.0": "修复：补充 _PluginBase 抽象方法 get_api/get_command，解决插件无法实例化导致设置页不存在的问题",
+      "v1.9": "修复：按 V2 规范修正 get_form 返回默认配置模型，并拆分 get_page 状态页，恢复通知与限速设置项显示",
+      "v1.8": "修复：按 MoviePilot V2 官方规范将 package.v2.json 插件ID改为类名 EmbyQBLimit，解决安装后按小写ID重载导致插件未初始化的问题",
+      "v1.7": "修复：重新发布新版本安装包，避开 GitHub Release 同名附件缓存导致 MoviePilot 安装旧包的问题",
+      "v1.6": "修复：修正实际源码导入路径 app.core.plugin → app.plugins，解决无法导入 _PluginBase 导致插件加载失败的问题",
+      "v1.5": "修复：修正ZIP包结构，将__init__.py移至根目录（原在plugins.v2/embyqblimit/下），确保MoviePilot能正确识别和加载插件",
+      "v1.4": "修复：修正导入路径（app.core.plugin → app.plugins），修复插件无法加载问题",
+      "v1.3": "修复：修正plugin_version格式，确保与package.v2.json版本号一致（1.2.0 → 1.2），修复中文字符编码",
+      "v1.2": "修复：package.v2.json配置格式，移除多余id字段，添加labels标签，修正版本号格式",
+      "v1.1": "新增：会话保持、重试机制、多服务器支持（Emby/Jellyfin/Plex）、白名单用户/设备过滤、自定义检查间隔",
+      "v1.0": "初始版本，支持Emby播放监控和qBittorrent自动限速"
+    }
+  },
+  "EmbyDeleteGuard": {
+    "name": "Emby删除兜底清理",
+    "description": "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。",
+    "labels": "媒体库,清理,下载管理",
+    "version": "1.2",
+    "icon": "delete_sweep.png",
+    "author": "老公",
+    "level": 1,
+    "v2": true,
+    "release": false,
+    "history": {
+      "v1.2": "新增：插件页面历史记录，保存最近漏删复查报告，展示残留数量、路径、摘要和安全报告状态。",
+      "v1.1": "新增：检测到漏删时发送明确通知，并增加独立开关 notify_on_residue。",
+      "v1.0": "新增：监听 Emby/Jellyfin/Plex 删除类 Webhook，延迟复查清理媒体库残留文件、刮削文件、空目录及下载器任务，默认只报告不删除。"
+    }
+  }
+}
