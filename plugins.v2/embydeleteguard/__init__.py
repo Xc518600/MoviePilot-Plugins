@@ -18,7 +18,7 @@ class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -51,6 +51,9 @@ class EmbyDeleteGuard(_PluginBase):
     _allowed_roots = ""
     _reference_cleaner_plugins = True
     _reference_enabled_only = True
+    _name_search_enabled = True
+    _name_search_max_depth = 4
+    _name_search_max_results = 80
     _clean_scrap = True
     _clean_empty_dirs = True
     _clean_media = False
@@ -88,6 +91,9 @@ class EmbyDeleteGuard(_PluginBase):
             self._allowed_roots = config.get("allowed_roots") or ""
             self._reference_cleaner_plugins = bool(config.get("reference_cleaner_plugins", True))
             self._reference_enabled_only = bool(config.get("reference_enabled_only", True))
+            self._name_search_enabled = bool(config.get("name_search_enabled", True))
+            self._name_search_max_depth = int(config.get("name_search_max_depth") or 4)
+            self._name_search_max_results = int(config.get("name_search_max_results") or 80)
             self._clean_scrap = bool(config.get("clean_scrap", True))
             self._clean_empty_dirs = bool(config.get("clean_empty_dirs", True))
             self._clean_media = bool(config.get("clean_media", False))
@@ -107,7 +113,7 @@ class EmbyDeleteGuard(_PluginBase):
             logger.info(
                 f"Emby删除兜底清理已启用：mode={mode}, delay={self._delay_seconds}s, "
                 f"clean_scrap={self._clean_scrap}, clean_media={self._clean_media}, delete_torrents={self._delete_torrents}, "
-                f"reference_cleaner_plugins={self._reference_cleaner_plugins}"
+                f"reference_cleaner_plugins={self._reference_cleaner_plugins}, name_search={self._name_search_enabled}"
             )
             referenced = self._referenced_cleaner_roots()
             if referenced:
@@ -141,6 +147,7 @@ class EmbyDeleteGuard(_PluginBase):
                     {"component": "td", "text": str(item.get("scrap_count", 0))},
                     {"component": "td", "text": str(item.get("other_count", 0))},
                     {"component": "td", "text": str(item.get("empty_dir_count", 0))},
+                    {"component": "td", "text": str(item.get("name_match_count", 0))},
                     {"component": "td", "text": str(item.get("torrent_count", 0))},
                     {"component": "td", "text": "是" if item.get("dry_run") else "否"},
                     {"component": "td", "text": item.get("summary", "")},
@@ -188,6 +195,7 @@ class EmbyDeleteGuard(_PluginBase):
                                 {"component": "th", "text": "刮削/字幕"},
                                 {"component": "th", "text": "其他"},
                                 {"component": "th", "text": "空目录"},
+                                {"component": "th", "text": "名称搜索"},
                                 {"component": "th", "text": "种子"},
                                 {"component": "th", "text": "只报告"},
                                 {"component": "th", "text": "摘要"},
@@ -290,6 +298,21 @@ class EmbyDeleteGuard(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "name_search_enabled", "label": "按媒体名二次搜索", "hint": "Emby 删除后，在对应清理插件路径内按剧集/电影名搜索残留，作为双重保险"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "name_search_max_depth", "label": "名称搜索最大深度", "type": "number", "placeholder": "4"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "name_search_max_results", "label": "名称搜索最大结果数", "type": "number", "placeholder": "80"}}]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{
                                     "component": "VTextarea",
@@ -370,6 +393,9 @@ class EmbyDeleteGuard(_PluginBase):
             "allowed_roots": "",
             "reference_cleaner_plugins": True,
             "reference_enabled_only": True,
+            "name_search_enabled": True,
+            "name_search_max_depth": 4,
+            "name_search_max_results": 80,
             "path_mappings": "",
             "clean_scrap": True,
             "clean_empty_dirs": True,
@@ -428,22 +454,33 @@ class EmbyDeleteGuard(_PluginBase):
             logger.warning(f"Emby删除兜底清理跳过非允许路径：{mapped_path}")
             return
 
-        logger.info(f"Emby删除兜底清理收到删除事件：event={event_type}, item={item_name}, path={mapped_path}，将在 {self._delay_seconds}s 后复查")
+        search_names = self._extract_search_names(event_info, item_name, path)
+        logger.info(f"Emby删除兜底清理收到删除事件：event={event_type}, item={item_name}, path={mapped_path}，将在 {self._delay_seconds}s 后复查，搜索关键词={search_names}")
         timer = threading.Timer(
             max(0, self._delay_seconds),
             self._guard_cleanup,
-            kwargs={"path": path, "item_name": item_name, "event_type": event_type, "channel": channel},
+            kwargs={"path": path, "item_name": item_name, "event_type": event_type, "channel": channel, "search_names": search_names},
         )
         timer.daemon = True
         with self._lock:
             self._timers.append(timer)
         timer.start()
 
-    def _guard_cleanup(self, path: Path, item_name: str, event_type: str, channel: str):
+    def _guard_cleanup(self, path: Path, item_name: str, event_type: str, channel: str, search_names: List[str] = None):
         try:
             result = self._inspect_residue(path)
+            if self._name_search_enabled:
+                result["name_search_matches"] = self._search_by_media_names(search_names or [], path)
+            else:
+                result["name_search_matches"] = []
             torrents = self._find_torrents(path)
-            result["torrents"] = torrents
+            # 名称搜索命中的残留路径也参与种子匹配，避免只按原 path 漏掉。
+            for matched_path in result.get("name_search_matches") or []:
+                try:
+                    torrents.extend(self._find_torrents(Path(matched_path)))
+                except Exception:
+                    pass
+            result["torrents"] = self._dedupe_torrents(torrents)
 
             actions = []
             if self._emit_download_deleted_event:
@@ -558,6 +595,108 @@ class EmbyDeleteGuard(_PluginBase):
                     actions.append(f"清理空目录：{d}")
         return actions
 
+    def _extract_search_names(self, event_info: WebhookEventInfo, item_name: str, path: Path) -> List[str]:
+        """从 Emby/Jellyfin/Plex 删除事件提取适合搜索的剧集/电影名关键词。"""
+        names: List[str] = []
+        json_obj = getattr(event_info, "json_object", None) or {}
+        item = json_obj.get("Item") if isinstance(json_obj, dict) and isinstance(json_obj.get("Item"), dict) else {}
+        for key in ("SeriesName", "Name", "OriginalTitle", "FileName"):
+            val = item.get(key)
+            if val:
+                names.append(str(val))
+        if item_name:
+            names.append(str(item_name))
+        if path.name:
+            names.append(path.stem if path.suffix else path.name)
+        # 清理 S01E02、年份、括号内容等噪声，保留中英文主标题。
+        expanded: List[str] = []
+        for name in names:
+            for candidate in self._normalize_search_name(name):
+                if candidate and candidate not in expanded:
+                    expanded.append(candidate)
+        return expanded[:8]
+
+    @staticmethod
+    def _normalize_search_name(name: str) -> List[str]:
+        raw = (name or "").strip()
+        if not raw:
+            return []
+        values = [raw]
+        cleaned = re.sub(r"S\d{1,2}E\d{1,3}.*$", "", raw, flags=re.I).strip()
+        cleaned = re.sub(r"第\s*\d+\s*[集话話].*$", "", cleaned).strip()
+        cleaned = re.sub(r"\(\d{4}\)|（\d{4}）", "", cleaned).strip()
+        cleaned = re.sub(r"\[[^\]]+\]", "", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-_—")
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+        # 中文名通常在第一个空格前；英文/点分名保留 cleaned。
+        if " " in cleaned:
+            first = cleaned.split(" ", 1)[0].strip()
+            if re.search(r"[\u4e00-\u9fff]", first) and first not in values:
+                values.append(first)
+        return [v for v in values if len(v) >= 2]
+
+    def _search_by_media_names(self, names: List[str], original_path: Path) -> List[str]:
+        if not names:
+            return []
+        roots = self._allowed_roots_list()
+        if not roots:
+            return []
+        # 优先搜索原路径所属的清理插件根目录，避免跨硬盘/跨分类误报；找不到归属再搜全部参考根。
+        related_roots = []
+        try:
+            op = original_path.resolve(strict=False)
+        except Exception:
+            op = original_path.absolute()
+        for root in roots:
+            try:
+                rp = root.resolve(strict=False)
+                if op == rp or op.is_relative_to(rp):
+                    related_roots.append(root)
+            except Exception:
+                if str(op).startswith(str(root).rstrip("/") + "/"):
+                    related_roots.append(root)
+        search_roots = related_roots or roots
+        matches: List[str] = []
+        seen = set()
+        lowered = [n.lower() for n in names if n]
+        for root in search_roots:
+            if len(matches) >= self._name_search_max_results:
+                break
+            if not root.exists() or not root.is_dir() or not self._is_safe_target(root):
+                continue
+            root_depth = len(root.parts)
+            for current, dirnames, filenames in os.walk(root):
+                cpath = Path(current)
+                depth = len(cpath.parts) - root_depth
+                if depth >= self._name_search_max_depth:
+                    dirnames[:] = []
+                candidates = list(dirnames) + list(filenames)
+                for name in candidates:
+                    nlow = name.lower()
+                    if any(key and key in nlow for key in lowered):
+                        full = (cpath / name).as_posix()
+                        if full not in seen:
+                            seen.add(full)
+                            matches.append(full)
+                            if len(matches) >= self._name_search_max_results:
+                                break
+                if len(matches) >= self._name_search_max_results:
+                    break
+        return matches
+
+    @staticmethod
+    def _dedupe_torrents(torrents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        uniq = []
+        seen = set()
+        for item in torrents or []:
+            key = (item.get("downloader"), item.get("hash") or item.get("id") or item.get("name"))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(item)
+        return uniq
+
     def _find_torrents(self, path: Path) -> List[Dict[str, Any]]:
         matched = []
         try:
@@ -639,12 +778,13 @@ class EmbyDeleteGuard(_PluginBase):
         other_count = len(result.get("other_files") or [])
         empty_count = len(result.get("empty_dirs") or [])
         torrent_count = len(result.get("torrents") or [])
+        name_match_count = len(result.get("name_search_matches") or [])
         title = "Emby删除兜底清理"
         lines = [
             f"媒体：{item_name}",
             f"事件：{channel}/{event_type}",
             f"路径：{path}",
-            f"残留：媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，种子 {torrent_count}",
+            f"残留：媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，名称搜索 {name_match_count}，种子 {torrent_count}",
         ]
         if result.get("scan_truncated"):
             lines.append(f"扫描达到上限 {self._max_scan_files}，结果可能不完整")
@@ -652,6 +792,9 @@ class EmbyDeleteGuard(_PluginBase):
         if sample_files:
             lines.append("残留样例：")
             lines.extend([f"- {p}" for p in sample_files[:8]])
+        if result.get("name_search_matches"):
+            lines.append("名称搜索命中：")
+            lines.extend([f"- {p}" for p in (result.get("name_search_matches") or [])[:8]])
         if result.get("torrents"):
             lines.append("残留种子：")
             for t in (result.get("torrents") or [])[:5]:
@@ -661,7 +804,7 @@ class EmbyDeleteGuard(_PluginBase):
             lines.extend([f"- {a}" for a in actions[:8]])
         text = "\n".join(lines)
         logger.info(text)
-        has_residue = bool(media_count or scrap_count or other_count or empty_count or torrent_count)
+        has_residue = bool(media_count or scrap_count or other_count or empty_count or name_match_count or torrent_count)
         self._save_history_record(
             path=path,
             item_name=item_name,
@@ -672,7 +815,7 @@ class EmbyDeleteGuard(_PluginBase):
             has_residue=has_residue,
         )
         if has_residue:
-            logger.warning(f"Emby删除兜底清理检测到漏删：{item_name}，媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，种子 {torrent_count}")
+            logger.warning(f"Emby删除兜底清理检测到漏删：{item_name}，媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，名称搜索 {name_match_count}，种子 {torrent_count}")
 
         should_notify = bool(self._notify and (
             (has_residue and self._notify_on_residue)
@@ -694,6 +837,7 @@ class EmbyDeleteGuard(_PluginBase):
             other_files = [str(p) for p in (result.get("other_files") or [])]
             empty_dirs = [str(p) for p in (result.get("empty_dirs") or [])]
             torrents = result.get("torrents") or []
+            name_matches = [str(p) for p in (result.get("name_search_matches") or [])]
             torrent_items = [
                 {
                     "downloader": t.get("downloader"),
@@ -713,6 +857,8 @@ class EmbyDeleteGuard(_PluginBase):
                 summary_parts.append(f"其他{len(other_files)}")
             if empty_dirs:
                 summary_parts.append(f"空目录{len(empty_dirs)}")
+            if name_matches:
+                summary_parts.append(f"名称搜索{len(name_matches)}")
             if torrent_items:
                 summary_parts.append(f"种子{len(torrent_items)}")
             summary = "，".join(summary_parts) if summary_parts else "无残留"
@@ -727,6 +873,7 @@ class EmbyDeleteGuard(_PluginBase):
                 "scrap_count": len(scrap_files),
                 "other_count": len(other_files),
                 "empty_dir_count": len(empty_dirs),
+                "name_match_count": len(name_matches),
                 "torrent_count": len(torrents),
                 "dry_run": bool(self._dry_run),
                 "summary": summary,
@@ -734,6 +881,7 @@ class EmbyDeleteGuard(_PluginBase):
                 "scrap_files": scrap_files[:30],
                 "other_files": other_files[:20],
                 "empty_dirs": empty_dirs[:20],
+                "name_search_matches": name_matches[:40],
                 "torrents": torrent_items,
                 "actions": list(actions or [])[:20],
             }
@@ -754,6 +902,9 @@ class EmbyDeleteGuard(_PluginBase):
                 "allowed_roots": self._allowed_roots,
                 "reference_cleaner_plugins": self._reference_cleaner_plugins,
                 "reference_enabled_only": self._reference_enabled_only,
+                "name_search_enabled": self._name_search_enabled,
+                "name_search_max_depth": self._name_search_max_depth,
+                "name_search_max_results": self._name_search_max_results,
                 "path_mappings": self._path_mappings,
                 "clean_scrap": self._clean_scrap,
                 "clean_empty_dirs": self._clean_empty_dirs,
