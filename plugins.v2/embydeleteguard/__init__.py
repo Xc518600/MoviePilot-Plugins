@@ -18,7 +18,7 @@ class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -49,6 +49,8 @@ class EmbyDeleteGuard(_PluginBase):
     _delay_seconds = 60
     _watch_servers = "emby,jellyfin,plex"
     _allowed_roots = ""
+    _reference_cleaner_plugins = True
+    _reference_enabled_only = True
     _clean_scrap = True
     _clean_empty_dirs = True
     _clean_media = False
@@ -61,6 +63,15 @@ class EmbyDeleteGuard(_PluginBase):
     _dedupe_seconds = 300
     _history_limit = 100
     _history: List[Dict[str, Any]] = []
+    _cleaner_plugin_ids = {
+        "RemoveLink": "清理媒体文件",
+        "RemoveLink1": "国漫",
+        "RemoveLink22": "外语电影",
+        "RemoveLink2244": "华语电影",
+        "RemoveLink224455": "国产电视剧",
+        "RemoveLink22445566": "欧美剧",
+        "RemoveLink33": "日韩剧",
+    }
 
     _timers: List[threading.Timer] = []
     _recent_keys: Dict[str, float] = {}
@@ -75,6 +86,8 @@ class EmbyDeleteGuard(_PluginBase):
             self._delay_seconds = int(config.get("delay_seconds") or 60)
             self._watch_servers = config.get("watch_servers") or "emby,jellyfin,plex"
             self._allowed_roots = config.get("allowed_roots") or ""
+            self._reference_cleaner_plugins = bool(config.get("reference_cleaner_plugins", True))
+            self._reference_enabled_only = bool(config.get("reference_enabled_only", True))
             self._clean_scrap = bool(config.get("clean_scrap", True))
             self._clean_empty_dirs = bool(config.get("clean_empty_dirs", True))
             self._clean_media = bool(config.get("clean_media", False))
@@ -93,8 +106,12 @@ class EmbyDeleteGuard(_PluginBase):
             mode = "只报告" if self._dry_run else "自动清理"
             logger.info(
                 f"Emby删除兜底清理已启用：mode={mode}, delay={self._delay_seconds}s, "
-                f"clean_scrap={self._clean_scrap}, clean_media={self._clean_media}, delete_torrents={self._delete_torrents}"
+                f"clean_scrap={self._clean_scrap}, clean_media={self._clean_media}, delete_torrents={self._delete_torrents}, "
+                f"reference_cleaner_plugins={self._reference_cleaner_plugins}"
             )
+            referenced = self._referenced_cleaner_roots()
+            if referenced:
+                logger.info(f"Emby删除兜底清理已参考清理媒体文件/分身插件路径：{referenced}")
         else:
             logger.info("Emby删除兜底清理未启用")
 
@@ -146,7 +163,7 @@ class EmbyDeleteGuard(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": f"最近漏删复查记录：{len(history[: self._history_limit])} 条。安全报告模式下只记录和通知，不会删除文件或种子。"
+                    "text": f"最近漏删复查记录：{len(history[: self._history_limit])} 条。安全报告模式下只记录和通知，不会删除文件或种子。已参考清理插件路径：{len(self._referenced_cleaner_roots())} 个。"
                 }
             },
             {
@@ -257,6 +274,22 @@ class EmbyDeleteGuard(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "reference_cleaner_plugins", "label": "参考清理媒体文件及分身插件路径", "hint": "自动读取 清理媒体文件/国漫/华语电影/外语电影/国产电视剧/欧美剧/日韩剧 的 monitor_dirs 作为允许复查根目录"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "reference_enabled_only", "label": "只参考已启用的清理插件", "hint": "关闭后会读取这些插件配置里的路径，即使对应插件未启用"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{
                                     "component": "VTextarea",
@@ -335,6 +368,8 @@ class EmbyDeleteGuard(_PluginBase):
             "delay_seconds": 60,
             "watch_servers": "emby,jellyfin,plex",
             "allowed_roots": "",
+            "reference_cleaner_plugins": True,
+            "reference_enabled_only": True,
             "path_mappings": "",
             "clean_scrap": True,
             "clean_empty_dirs": True,
@@ -717,6 +752,8 @@ class EmbyDeleteGuard(_PluginBase):
                 "delay_seconds": self._delay_seconds,
                 "watch_servers": self._watch_servers,
                 "allowed_roots": self._allowed_roots,
+                "reference_cleaner_plugins": self._reference_cleaner_plugins,
+                "reference_enabled_only": self._reference_enabled_only,
                 "path_mappings": self._path_mappings,
                 "clean_scrap": self._clean_scrap,
                 "clean_empty_dirs": self._clean_empty_dirs,
@@ -826,12 +863,54 @@ class EmbyDeleteGuard(_PluginBase):
         return mapped
 
     def _allowed_roots_list(self) -> List[Path]:
-        roots = []
+        roots: List[Path] = []
         for line in (self._allowed_roots or "").splitlines():
             line = line.strip()
             if line:
                 roots.append(Path(line))
-        return roots
+        if self._reference_cleaner_plugins:
+            roots.extend(Path(p) for p in self._referenced_cleaner_roots())
+        # 去重，保持顺序；注意 /media2 与 /media22 是不同 Path，后续 is_relative_to 会按路径边界判断。
+        uniq: List[Path] = []
+        seen = set()
+        for root in roots:
+            key = root.as_posix().rstrip("/")
+            if key and key not in seen:
+                seen.add(key)
+                uniq.append(Path(key))
+        return uniq
+
+    def _referenced_cleaner_roots(self) -> List[str]:
+        """读取 清理媒体文件 及其分身插件的 monitor_dirs/STRM 映射目录。"""
+        roots: List[str] = []
+        for pid, name in self._cleaner_plugin_ids.items():
+            try:
+                cfg = self.systemconfig.get(f"plugin.{pid}") or {}
+            except Exception as e:
+                logger.debug(f"读取清理插件 {pid}/{name} 配置失败：{e}")
+                cfg = {}
+            if not isinstance(cfg, dict):
+                continue
+            if self._reference_enabled_only and not bool(cfg.get("enabled")):
+                continue
+            for line in str(cfg.get("monitor_dirs") or "").splitlines():
+                line = line.strip()
+                if line:
+                    roots.append(line.rstrip("/"))
+            # STRM 映射格式：strm目录:存储类型:网盘目录 或 strm目录:网盘目录，这里只取第一段监控目录。
+            for line in str(cfg.get("strm_path_mappings") or "").splitlines():
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                roots.append(line.split(":", 1)[0].strip().rstrip("/"))
+        # 去重
+        uniq: List[str] = []
+        seen = set()
+        for root in roots:
+            if root and root not in seen:
+                seen.add(root)
+                uniq.append(root)
+        return uniq
 
     def _is_safe_target(self, path: Path) -> bool:
         try:
