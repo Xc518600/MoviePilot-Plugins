@@ -459,44 +459,48 @@ class DiskSpaceAutoCleaner(_PluginBase):
             return
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
         
-        # 按类型分组候选项
-        grouped = self._group_candidates(selected)
-        
-        lines = [
-            "📊 硬盘空间自动清理：空间不足提醒",
-            "",
-            f"监控路径：{monitor_path}",
-            f"剩余空间：{free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
-            f"实际扫描：{', '.join(scan_paths or []) or '未匹配到扫描路径'}",
-            f"目标还需释放：{needed_gb:.1f}GB",
-            "",
-            f"📋 建议清理候选（{len(selected)} 个，预计释放 {reclaim_gb:.1f}GB）：",
-            "",
-        ]
-        
-        # 按类型显示候选清单
-        for category_type, category_info in grouped.items():
-            icon = category_info.get("icon", "📁")
-            type_name = category_info.get("name", category_type)
-            count = category_info.get("count", 0)
-            total_size_gb = category_info.get("total_size_gb", 0)
-            items = category_info.get("items", [])
+        if not selected:
+            # 没有候选删除项，发送空间不足但无候选的通知
+            lines = [
+                "📊 硬盘空间自动清理：空间不足",
+                "",
+                f"剩余空间：{free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
+                f"目标还需释放：{needed_gb:.1f}GB",
+                "",
+                "⚠️ 未找到符合条件的删除候选",
+                "",
+                "💡 当前为安全报告模式：未删除任何文件。"
+            ]
+        else:
+            # 有候选删除项，发送简洁的删除建议通知
+            lines = ["📊 硬盘空间自动清理：删除建议"]
             
-            lines.append(f"  {icon} {type_name}（{count}个，{total_size_gb:.1f}GB）：")
-            for item in items:
-                name = item.get("name", "未知")
-                size_gb = item.get("size_gb", 0)
-                age_days = item.get("age_days", 0)
-                path = item.get("path", "")
-                lines.append(f"    - {name} | {size_gb:.1f}GB | {age_days}天 | {path}")
+            # 按类型分组候选项
+            grouped = self._group_candidates(selected)
+            
+            # 只显示删除的媒体名称和总空间
+            for category_type, category_info in grouped.items():
+                icon = category_info.get("icon", "📁")
+                type_name = category_info.get("name", category_type)
+                count = category_info.get("count", 0)
+                total_size_gb = category_info.get("total_size_gb", 0)
+                items = category_info.get("items", [])
+                
+                if count > 0:
+                    lines.append(f"")
+                    lines.append(f"{icon} {type_name}（{count}部，共{total_size_gb:.1f}GB）：")
+                    for item in items:
+                        name = item.get("name", "未知")
+                        size_gb = item.get("size_gb", 0)
+                        lines.append(f"  • {name} - {size_gb:.1f}GB")
+            
             lines.append("")
-        
-        lines.append(f"🔧 诊断：{self._diagnosis_text(diagnosis)}")
-        lines.append("")
-        lines.append("💡 当前为安全报告模式：未删除任何文件。")
+            lines.append(f"💰 预计释放总空间：{reclaim_gb:.1f}GB")
+            lines.append("")
+            lines.append("💡 当前为安全报告模式：未删除任何文件。")
         
         try:
-            self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理：空间不足", text="\n".join(lines))
+            self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理", text="\n".join(lines))
         except Exception as e:
             logger.warning(f"发送硬盘空间自动清理通知失败：{e}")
 
