@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.6 默认只报告，不删除任何文件，按类型分组显示候选清单，智能识别避免电视剧缺集，支持混放路径。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.7 简化通知信息，只显示删除的媒体名称和释放的总空间。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.6"
+    plugin_version = "1.7"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
