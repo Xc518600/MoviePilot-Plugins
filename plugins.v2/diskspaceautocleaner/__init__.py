@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.3 默认只报告，不删除任何文件。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.4 默认只报告，不删除任何文件，按类型分组显示候选清单。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -458,24 +458,75 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if not self._notify:
             return
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
+        
+        # 按类型分组候选项
+        grouped = self._group_candidates(selected)
+        
         lines = [
-            "硬盘空间自动清理：空间不足提醒",
+            "📊 硬盘空间自动清理：空间不足提醒",
+            "",
             f"监控路径：{monitor_path}",
             f"剩余空间：{free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
             f"实际扫描：{', '.join(scan_paths or []) or '未匹配到扫描路径'}",
             f"目标还需释放：{needed_gb:.1f}GB",
-            f"建议候选：{len(selected)} 个，预计可释放 {reclaim_gb:.1f}GB",
-            f"诊断：{self._diagnosis_text(diagnosis)}",
-            "当前为 v1.3 安全报告模式：未删除任何文件。",
+            "",
+            f"📋 建议清理候选（{len(selected)} 个，预计释放 {reclaim_gb:.1f}GB）：",
+            "",
         ]
-        if selected:
-            lines.append("建议清理样例：")
-            for item in selected[:10]:
-                lines.append(f"- {item.get('name')} | {item.get('size_gb'):.1f}GB | {item.get('age_days')}天未修改 | {item.get('path')}")
+        
+        # 按类型显示候选清单
+        for category_type, category_info in grouped.items():
+            icon = category_info.get("icon", "📁")
+            type_name = category_info.get("name", category_type)
+            count = category_info.get("count", 0)
+            total_size_gb = category_info.get("total_size_gb", 0)
+            items = category_info.get("items", [])
+            
+            lines.append(f"  {icon} {type_name}（{count}个，{total_size_gb:.1f}GB）：")
+            for item in items:
+                name = item.get("name", "未知")
+                size_gb = item.get("size_gb", 0)
+                age_days = item.get("age_days", 0)
+                path = item.get("path", "")
+                lines.append(f"    - {name} | {size_gb:.1f}GB | {age_days}天 | {path}")
+            lines.append("")
+        
+        lines.append(f"🔧 诊断：{self._diagnosis_text(diagnosis)}")
+        lines.append("")
+        lines.append("💡 当前为安全报告模式：未删除任何文件。")
+        
         try:
             self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理：空间不足", text="\n".join(lines))
         except Exception as e:
             logger.warning(f"发送硬盘空间自动清理通知失败：{e}")
+
+    def _group_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """将候选项按类型分组（电影、电视剧、其他）。"""
+        grouped = {
+            "电影": {"icon": "🎬", "name": "电影", "count": 0, "total_size_gb": 0, "items": []},
+            "电视剧": {"icon": "📺", "name": "电视剧", "count": 0, "total_size_gb": 0, "items": []},
+            "其他": {"icon": "📁", "name": "其他", "count": 0, "total_size_gb": 0, "items": []},
+        }
+        
+        for item in candidates:
+            path = item.get("path", "")
+            name = item.get("name", "")
+            size_gb = float(item.get("size_gb") or 0)
+            
+            # 判断类型
+            item_type = "其他"
+            if path and ("/电影/" in path or "/movie/" in path.lower() or "/movies/" in path.lower()):
+                item_type = "电影"
+            elif path and ("/电视剧/" in path or "/tv/" in path.lower() or "/series/" in path.lower() or "/drama/" in path.lower()):
+                item_type = "电视剧"
+            
+            grouped[item_type]["count"] += 1
+            grouped[item_type]["total_size_gb"] += size_gb
+            grouped[item_type]["items"].append(item)
+        
+        # 移除空的分类
+        result = {k: v for k, v in grouped.items() if v["count"] > 0}
+        return result
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
