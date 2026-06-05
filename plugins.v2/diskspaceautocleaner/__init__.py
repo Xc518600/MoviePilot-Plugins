@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.7 简化通知信息，只显示删除的媒体名称和释放的总空间。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.8 添加每次删除最大空间限制，避免一次性删除过多。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.7"
+    plugin_version = "1.8"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -33,6 +33,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _max_scan_items = 5000
     _candidate_depth = 2
     _recent_days_protect = 30
+    _max_delete_gb = 1000  # 每次删除的最大空间限制（GB）
     _protect_dirs = ""
     _protect_keywords = ""
     _history_limit = 50
@@ -57,6 +58,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._max_scan_items = int(config.get("max_scan_items") or 5000)
             self._candidate_depth = int(config.get("candidate_depth") or 2)
             self._recent_days_protect = int(config.get("recent_days_protect") or 30)
+            self._max_delete_gb = int(config.get("max_delete_gb") or 1000)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
             self._history_limit = int(config.get("history_limit") or 50)
@@ -187,6 +189,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "max_delete_gb", "label": "每次删除最大空间GB", "type": "number", "placeholder": "1000", "hint": "单次清理时最多删除的空间限制，避免一次性删除过多。0 表示不限制"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "history_limit", "label": "历史记录保留条数", "type": "number", "placeholder": "50"}}]
                             },
                             {
@@ -221,6 +228,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "protect_dirs": "",
             "protect_keywords": "",
             "history_limit": 50,
+            "max_delete_gb": 1000,
             "history": [],
             "sources": "immediate",
         }
@@ -443,13 +451,26 @@ class DiskSpaceAutoCleaner(_PluginBase):
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
         total = 0.0
+        max_delete_gb = float(self._max_delete_gb or 1000)
+        
         for item in candidates:
+            # 检查候选数量限制
             if len(selected) >= self._max_candidates:
                 break
-            selected.append(item)
-            total += float(item.get("size_gb") or 0)
+            
+            # 检查已达到目标空间
             if needed_gb > 0 and total >= needed_gb:
                 break
+            
+            # 检查单次删除最大空间限制
+            item_size_gb = float(item.get("size_gb") or 0)
+            if total + item_size_gb > max_delete_gb:
+                logger.info(f"达到单次删除最大空间限制 {max_delete_gb}GB，停止添加候选项")
+                break
+            
+            selected.append(item)
+            total += item_size_gb
+        
         return selected
 
     def _notify_report(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
@@ -602,6 +623,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "max_candidates": self._max_candidates,
                 "max_scan_items": self._max_scan_items,
                 "candidate_depth": self._candidate_depth,
+                "max_delete_gb": self._max_delete_gb,
                 "recent_days_protect": self._recent_days_protect,
                 "protect_dirs": self._protect_dirs,
                 "protect_keywords": self._protect_keywords,
