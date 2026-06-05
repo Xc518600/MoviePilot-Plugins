@@ -27,7 +27,7 @@ class EmbyDeleteGuard(_PluginBase):
     plugin_name = "Emby删除兜底清理"
     plugin_desc = "监听媒体服务器删除事件，延迟复查并兜底清理残留媒体、刮削文件、空目录和下载器任务。默认安全报告模式。"
     plugin_icon = "delete_sweep.png"
-    plugin_version = "1.5"
+    plugin_version = "1.5.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "embydeleteguard_"
@@ -576,6 +576,18 @@ class EmbyDeleteGuard(_PluginBase):
         scrap_files = [p for p in files if self._is_scrap_file(p) and not self._is_media_file(p)]
         other_files = [p for p in files if p not in media_files and p not in scrap_files]
         empty_dirs = self._find_empty_dirs(dirs)
+        
+        # 计算文件大小
+        file_sizes: Dict[str, int] = {}
+        for p in files:
+            try:
+                file_sizes[str(p)] = os.path.getsize(p)
+            except Exception:
+                pass
+        
+        # 计算总大小
+        total_size = sum(file_sizes.values())
+        
         return {
             "target": path,
             "candidates": candidates,
@@ -584,6 +596,8 @@ class EmbyDeleteGuard(_PluginBase):
             "other_files": other_files,
             "empty_dirs": empty_dirs,
             "scan_truncated": skipped,
+            "file_sizes": file_sizes,
+            "total_size": total_size,
         }
 
     def _candidate_roots(self, path: Path) -> List[Path]:
@@ -825,28 +839,92 @@ class EmbyDeleteGuard(_PluginBase):
         torrent_count = len(result.get("torrents") or [])
         name_match_count = len(result.get("name_search_matches") or [])
         title = "Emby删除兜底清理"
+        
+        # 获取文件大小信息
+        file_sizes = result.get("file_sizes", {})
+        total_size = result.get("total_size", 0)
+        
+        # 计算各类文件的大小
+        media_size = sum(file_sizes.get(str(p), 0) for p in (result.get("media_files") or []))
+        scrap_size = sum(file_sizes.get(str(p), 0) for p in (result.get("scrap_files") or []))
+        other_size = sum(file_sizes.get(str(p), 0) for p in (result.get("other_files") or []))
+        
         lines = [
             f"媒体：{item_name}",
             f"事件：{channel}/{event_type}",
             f"路径：{path}",
-            f"残留：媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，名称搜索 {name_match_count}，种子 {torrent_count}",
+            f"📊 残留统计：媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，名称搜索 {name_match_count}，种子 {torrent_count}",
+            f"💾 预计释放空间：{self._format_size(total_size)}（媒体 {self._format_size(media_size)} + 刮削 {self._format_size(scrap_size)} + 其他 {self._format_size(other_size)}）",
         ]
         if result.get("scan_truncated"):
-            lines.append(f"扫描达到上限 {self._max_scan_files}，结果可能不完整")
-        sample_files = (result.get("media_files") or [])[:5] + (result.get("scrap_files") or [])[:5]
-        if sample_files:
-            lines.append("残留样例：")
-            lines.extend([f"- {p}" for p in sample_files[:8]])
+            lines.append(f"⚠️ 扫描达到上限 {self._max_scan_files}，结果可能不完整")
+        
+        # 添加详细删除预览清单
+        lines.append("📋 删除预览清单：")
+        
+        # 媒体文件
+        if result.get("media_files"):
+            lines.append("  🎬 媒体文件：")
+            for p in (result.get("media_files") or [])[:10]:
+                size = file_sizes.get(str(p), 0)
+                lines.append(f"    - {p} ({self._format_size(size)})")
+            if len(result.get("media_files") or []) > 10:
+                lines.append(f"    ... 还有 {len(result.get('media_files') or []) - 10} 个媒体文件")
+        
+        # 刮削/字幕文件
+        if result.get("scrap_files"):
+            lines.append("  🖼️ 刮削/字幕文件：")
+            for p in (result.get("scrap_files") or [])[:10]:
+                size = file_sizes.get(str(p), 0)
+                lines.append(f"    - {p} ({self._format_size(size)})")
+            if len(result.get("scrap_files") or []) > 10:
+                lines.append(f"    ... 还有 {len(result.get('scrap_files') or []) - 10} 个刮削/字幕文件")
+        
+        # 其他文件
+        if result.get("other_files"):
+            lines.append("  📄 其他文件：")
+            for p in (result.get("other_files") or [])[:10]:
+                size = file_sizes.get(str(p), 0)
+                lines.append(f"    - {p} ({self._format_size(size)})")
+            if len(result.get("other_files") or []) > 10:
+                lines.append(f"    ... 还有 {len(result.get('other_files') or []) - 10} 个其他文件")
+        
+        # 空目录
+        if result.get("empty_dirs"):
+            lines.append(f"  📁 空目录（{len(result.get('empty_dirs') or [])}个）：")
+            for d in (result.get("empty_dirs") or [])[:5]:
+                lines.append(f"    - {d}")
+            if len(result.get("empty_dirs") or []) > 5:
+                lines.append(f"    ... 还有 {len(result.get('empty_dirs') or []) - 5} 个空目录")
+        
+        # 名称搜索匹配
         if result.get("name_search_matches"):
-            lines.append("名称搜索命中：")
-            lines.extend([f"- {p}" for p in (result.get("name_search_matches") or [])[:8]])
+            lines.append("  🔍 名称搜索命中：")
+            for p in (result.get("name_search_matches") or [])[:8]:
+                lines.append(f"    - {p}")
+            if len(result.get("name_search_matches") or []) > 8:
+                lines.append(f"    ... 还有 {len(result.get('name_search_matches') or []) - 8} 个匹配项")
+        
+        # 残留种子
         if result.get("torrents"):
-            lines.append("残留种子：")
+            lines.append("  🌱 残留种子：")
             for t in (result.get("torrents") or [])[:5]:
-                lines.append(f"- [{t.get('downloader')}] {t.get('name')}")
+                lines.append(f"    - [{t.get('downloader')}] {t.get('name')}")
+            if len(result.get("torrents") or []) > 5:
+                lines.append(f"    ... 还有 {len(result.get('torrents') or []) - 5} 个种子")
+        
+        # 执行的动作
         if actions:
-            lines.append("动作：")
-            lines.extend([f"- {a}" for a in actions[:8]])
+            lines.append("")
+            lines.append("🔧 已执行动作：")
+            lines.extend([f"  - {a}" for a in actions[:10]])
+            if len(actions) > 10:
+                lines.append(f"  ... 还有 {len(actions) - 10} 个动作")
+        
+        lines.append("")
+        lines.append("---")
+        lines.append(f"💡 提示：当前为{'安全报告模式' if self._dry_run else '自动清理模式'}，仅作预览未实际删除文件。" if self._dry_run else "✅ 已执行实际删除操作。")
+        
         text = "\n".join(lines)
         logger.info(text)
         has_residue = bool(media_count or scrap_count or other_count or empty_count or name_match_count or torrent_count)
@@ -1142,6 +1220,37 @@ class EmbyDeleteGuard(_PluginBase):
         target = target.rstrip("/")
         candidate = candidate.rstrip("/")
         return candidate == target or candidate.startswith(target + "/") or target.startswith(candidate + "/")
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """格式化文件大小为可读字符串。"""
+        if size_bytes == 0:
+            return "0 B"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if abs(size_bytes) < 1024:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.2f} PB"
+
+    def _calculate_total_size(self, paths: List[str]) -> int:
+        """计算文件列表的总大小（字节）。"""
+        total = 0
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    if os.path.isfile(path):
+                        total += os.path.getsize(path)
+                    elif os.path.isdir(path):
+                        # 目录大小递归计算
+                        for root, dirs, files in os.walk(path):
+                            for file in files:
+                                try:
+                                    total += os.path.getsize(os.path.join(root, file))
+                                except Exception:
+                                    pass
+            except Exception as e:
+                logger.warning(f"计算大小失败 {path}: {e}")
+        return total
 
     def _is_duplicate(self, key: str) -> bool:
         now = time.time()
