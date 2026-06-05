@@ -825,20 +825,29 @@ class EmbyDeleteGuard(_PluginBase):
         torrent_count = len(result.get("torrents") or [])
         name_match_count = len(result.get("name_search_matches") or [])
         title = "Emby删除兜底清理"
-        
-        # 计算删除的总空间
-        total_size = 0
-        all_files = (result.get("media_files") or []) + (result.get("scrap_files") or []) + (result.get("other_files") or [])
-        for file_path in all_files:
-            try:
-                total_size += file_path.stat().st_size
-            except Exception:
-                pass
-        
-        # 简化的通知信息
-        size_str = self._format_size(total_size)
-        text = f"已删除：{item_name}，释放空间：{size_str}"
-        
+        lines = [
+            f"媒体：{item_name}",
+            f"事件：{channel}/{event_type}",
+            f"路径：{path}",
+            f"残留：媒体 {media_count}，刮削/字幕 {scrap_count}，其他 {other_count}，空目录 {empty_count}，名称搜索 {name_match_count}，种子 {torrent_count}",
+        ]
+        if result.get("scan_truncated"):
+            lines.append(f"扫描达到上限 {self._max_scan_files}，结果可能不完整")
+        sample_files = (result.get("media_files") or [])[:5] + (result.get("scrap_files") or [])[:5]
+        if sample_files:
+            lines.append("残留样例：")
+            lines.extend([f"- {p}" for p in sample_files[:8]])
+        if result.get("name_search_matches"):
+            lines.append("名称搜索命中：")
+            lines.extend([f"- {p}" for p in (result.get("name_search_matches") or [])[:8]])
+        if result.get("torrents"):
+            lines.append("残留种子：")
+            for t in (result.get("torrents") or [])[:5]:
+                lines.append(f"- [{t.get('downloader')}] {t.get('name')}")
+        if actions:
+            lines.append("动作：")
+            lines.extend([f"- {a}" for a in actions[:8]])
+        text = "\n".join(lines)
         logger.info(text)
         has_residue = bool(media_count or scrap_count or other_count or empty_count or name_match_count or torrent_count)
         self._save_history_record(
@@ -1133,20 +1142,6 @@ class EmbyDeleteGuard(_PluginBase):
         target = target.rstrip("/")
         candidate = candidate.rstrip("/")
         return candidate == target or candidate.startswith(target + "/") or target.startswith(candidate + "/")
-
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        """格式化文件大小为易读格式"""
-        if size_bytes < 1024:
-            return f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
-            return f"{size_bytes / 1024:.2f} KB"
-        elif size_bytes < 1024 * 1024 * 1024:
-            return f"{size_bytes / (1024 * 1024):.2f} MB"
-        elif size_bytes < 1024 * 1024 * 1024 * 1024:
-            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-        else:
-            return f"{size_bytes / (1024 * 1024 * 1024 * 1024):.2f} TB"
 
     def _is_duplicate(self, key: str) -> bool:
         now = time.time()
