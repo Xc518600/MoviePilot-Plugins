@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.5 默认只报告，不删除任何文件，按类型分组显示候选清单，智能识别避免电视剧缺集。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.6 默认只报告，不删除任何文件，按类型分组显示候选清单，智能识别避免电视剧缺集，支持混放路径。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.5"
+    plugin_version = "1.6"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -501,7 +501,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             logger.warning(f"发送硬盘空间自动清理通知失败：{e}")
 
     def _group_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """将候选项按类型分组（电影、电视剧、其他）。"""
+        """将候选项按类型分组（电影、电视剧、其他）。使用智能识别判断类型。"""
         grouped = {
             "电影": {"icon": "🎬", "name": "电影", "count": 0, "total_size_gb": 0, "items": []},
             "电视剧": {"icon": "📺", "name": "电视剧", "count": 0, "total_size_gb": 0, "items": []},
@@ -509,16 +509,32 @@ class DiskSpaceAutoCleaner(_PluginBase):
         }
         
         for item in candidates:
-            path = item.get("path", "")
+            path_str = item.get("path", "")
             name = item.get("name", "")
             size_gb = float(item.get("size_gb") or 0)
             
-            # 判断类型
+            # 判断类型：优先使用智能识别
             item_type = "其他"
-            if path and ("/电影/" in path or "/movie/" in path.lower() or "/movies/" in path.lower()):
-                item_type = "电影"
-            elif path and ("/电视剧/" in path or "/tv/" in path.lower() or "/series/" in path.lower() or "/drama/" in path.lower()):
-                item_type = "电视剧"
+            
+            # 方法1：智能识别（根据目录结构）
+            if path_str:
+                path_obj = Path(path_str)
+                if self._is_series_folder(path_obj):
+                    item_type = "电视剧"
+                elif path_obj.is_dir():
+                    # 检查路径关键词
+                    path_lower = path_str.lower()
+                    if any(k in path_lower for k in ["/电影/", "/movie/", "/movies/"]):
+                        item_type = "电影"
+                    elif any(k in path_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]):
+                        item_type = "电视剧"
+                elif path_obj.is_file():
+                    # 文件按父目录判断
+                    parent_lower = str(path_obj.parent).lower()
+                    if any(k in parent_lower for k in ["/电影/", "/movie/", "/movies/"]):
+                        item_type = "电影"
+                    elif any(k in parent_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]):
+                        item_type = "电视剧"
             
             grouped[item_type]["count"] += 1
             grouped[item_type]["total_size_gb"] += size_gb
@@ -644,6 +660,23 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return False
 
 
+    def _is_series_folder(self, path: Path) -> bool:
+        """判断是否为电视剧目录（检查是否有 Season/S 目录）。"""
+        try:
+            if not path.is_dir():
+                return False
+            for child in path.iterdir():
+                if child.is_dir():
+                    name = child.name.lower()
+                    # 识别 Season/S/S01/Season 01 等模式
+                    if (name.startswith("season") or 
+                        (name.startswith("s") and len(name) > 1 and name[1:].isdigit()) or
+                        "season" in name):
+                        return True
+        except Exception:
+            pass
+        return False
+
     def _detect_root_type(self, path: Path) -> str:
         """检测根目录类型（电视剧/电影/其他）。"""
         path_str = path.as_posix().lower()
@@ -663,7 +696,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return "其他"
 
     def _iter_candidate_items(self, root: Path, depth: int):
-        """按候选深度产出候选项。电视剧根目录只扫描第一级子目录（剧集名），避免删除单季导致缺集。"""
+        """智能扫描候选：
+        - 电视剧根目录：只扫描第一级子目录（剧集名），避免删除单季导致缺集
+        - 混放根目录：智能识别电视剧，只返回剧集根目录，不扫描季目录
+        - 电影根目录：按配置深度扫描
+        """
         depth = max(1, int(depth or 1))
         root_type = self._detect_root_type(root)
         
@@ -677,19 +714,43 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 logger.debug(f"扫描电视剧根目录失败 {root}: {e}")
             return
         
+        # 混放根目录（类型A）：智能识别电视剧目录
+        def walk_mixed(current: Path, current_level: int):
+            try:
+                children = list(current.iterdir())
+            except Exception:
+                return
+            
+            for child in children:
+                # 如果是电视剧目录，只返回根目录
+                if child.is_dir() and self._is_series_folder(child):
+                    yield child
+                    continue
+                
+                # 其他目录/文件按深度扫描
+                if current_level >= depth or child.is_file():
+                    yield child
+                elif child.is_dir():
+                    yield from walk_mixed(child, current_level + 1)
+        
         # 电影和其他根目录：按配置深度扫描
-        def walk(current: Path, level: int):
+        def walk_normal(current: Path, current_level: int):
             try:
                 children = list(current.iterdir())
             except Exception:
                 return
             for child in children:
-                if level >= depth or child.is_file():
+                if current_level >= depth or child.is_file():
                     yield child
                 elif child.is_dir():
-                    yield from walk(child, level + 1)
-
-        yield from walk(root, 1)
+                    yield from walk_normal(child, current_level + 1)
+        
+        if root_type == "其他":
+            # 混放路径，使用智能扫描
+            yield from walk_mixed(root, 1)
+        else:
+            # 电影路径，使用正常扫描
+            yield from walk_normal(root, 1)
 
     @staticmethod
     def _diagnosis_text(diagnosis: Optional[Dict[str, Any]]) -> str:
