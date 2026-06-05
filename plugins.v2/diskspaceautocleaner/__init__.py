@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.2 默认只报告，不删除任何文件。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.3 默认只报告，不删除任何文件。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -31,6 +31,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _scan_interval_minutes = 60
     _max_candidates = 30
     _max_scan_items = 5000
+    _candidate_depth = 2
     _recent_days_protect = 30
     _protect_dirs = ""
     _protect_keywords = ""
@@ -54,6 +55,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._scan_interval_minutes = int(config.get("scan_interval_minutes") or 60)
             self._max_candidates = int(config.get("max_candidates") or 30)
             self._max_scan_items = int(config.get("max_scan_items") or 5000)
+            self._candidate_depth = int(config.get("candidate_depth") or 2)
             self._recent_days_protect = int(config.get("recent_days_protect") or 30)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
@@ -120,7 +122,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.2，不删除任何文件"}}]
+                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.3，不删除任何文件"}}]
                             },
                             {
                                 "component": "VCol",
@@ -180,6 +182,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "candidate_depth", "label": "候选扫描深度", "type": "number", "placeholder": "2", "hint": "默认2层，可识别 /link5/电影/电影A；填1只扫描根目录第一层"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "history_limit", "label": "历史记录保留条数", "type": "number", "placeholder": "50"}}]
                             },
                             {
@@ -209,6 +216,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "scan_interval_minutes": 60,
             "max_candidates": 30,
             "max_scan_items": 5000,
+            "candidate_depth": 2,
             "recent_days_protect": 30,
             "protect_dirs": "",
             "protect_keywords": "",
@@ -259,8 +267,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     {"component": "td", "text": item.get("time", "")},
                     {"component": "td", "text": item.get("monitor_path", "")},
                     {"component": "td", "text": item.get("free_text", "")},
+                    {"component": "td", "text": item.get("scan_paths_text", "")},
                     {"component": "td", "text": str(item.get("candidate_count", 0))},
                     {"component": "td", "text": item.get("reclaim_text", "")},
+                    {"component": "td", "text": item.get("diagnosis_text", "")},
                     {"component": "td", "text": item.get("summary", "")},
                 ]
             })
@@ -268,7 +278,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return [
             {
                 "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.2：支持路径映射；配置页支持保存后立即运行一次；只报告，不删除任何文件。"}
+                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.3：支持路径映射、候选扫描深度和诊断统计；只报告，不删除任何文件。"}
             },
             {
                 "component": "VCard",
@@ -302,8 +312,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         {"component": "th", "text": "时间"},
                         {"component": "th", "text": "监控路径"},
                         {"component": "th", "text": "剩余空间"},
+                        {"component": "th", "text": "实际扫描"},
                         {"component": "th", "text": "候选"},
                         {"component": "th", "text": "预计释放"},
+                        {"component": "th", "text": "诊断"},
                         {"component": "th", "text": "摘要"},
                     ]}]},
                     {"component": "tbody", "content": rows},
@@ -344,42 +356,68 @@ class DiskSpaceAutoCleaner(_PluginBase):
             total_gb = usage.total / 1024 ** 3
             free_percent = usage.free / usage.total * 100 if usage.total else 0
             logger.info(f"硬盘空间检查：{mpath} 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)")
+            scan_paths = self._media_paths_for_monitor(mpath)
             if free_gb >= self._min_free_gb:
-                self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议")
+                self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议", scan_paths=scan_paths)
                 continue
-            candidates = self._build_candidates(mpath)
+            candidates, diagnosis = self._build_candidates(mpath, scan_paths=scan_paths)
             needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
-            self._save_record(mpath, free_gb, total_gb, free_percent, selected, "空间不足，已生成建议清理列表")
-            self._notify_report(mpath, free_gb, total_gb, free_percent, selected, needed_gb)
+            summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
+            self._save_record(mpath, free_gb, total_gb, free_percent, selected, summary, scan_paths=scan_paths, diagnosis=diagnosis)
+            self._notify_report(mpath, free_gb, total_gb, free_percent, selected, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis)
 
-    def _build_candidates(self, monitor_path: Optional[Path] = None) -> List[Dict[str, Any]]:
-        media_paths = self._media_paths_for_monitor(monitor_path)
+    def _build_candidates(self, monitor_path: Optional[Path] = None, scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
         protect_dirs = [Path(p).as_posix().rstrip("/") for p in self._lines(self._protect_dirs)]
         protect_keywords = [k.lower() for k in self._lines(self._protect_keywords)]
-        candidates = []
-        scanned = 0
+        candidates: List[Dict[str, Any]] = []
+        diagnosis = {
+            "scan_paths": media_paths,
+            "roots_total": len(media_paths),
+            "roots_missing": 0,
+            "roots_unsafe": 0,
+            "items_scanned": 0,
+            "protected_skipped": 0,
+            "recent_skipped": 0,
+            "zero_size_skipped": 0,
+            "error_skipped": 0,
+            "candidate_depth": max(1, int(self._candidate_depth or 2)),
+            "limit_reached": False,
+        }
         now = time.time()
         recent_seconds = max(0, int(self._recent_days_protect or 0)) * 86400
+        max_items = max(1, int(self._max_scan_items or 5000))
+        depth = max(1, int(self._candidate_depth or 2))
 
         for media_root in media_paths:
             root = Path(media_root)
-            if not root.exists() or not root.is_dir() or not self._is_safe_root(root):
+            if not root.exists() or not root.is_dir():
+                diagnosis["roots_missing"] += 1
+                logger.warning(f"媒体扫描路径不存在或不是目录：{root}")
+                continue
+            if not self._is_safe_root(root):
+                diagnosis["roots_unsafe"] += 1
+                logger.warning(f"媒体扫描路径被安全规则跳过：{root}")
                 continue
             try:
-                for child in root.iterdir():
-                    scanned += 1
-                    if scanned > self._max_scan_items:
-                        logger.warning(f"扫描达到上限：{self._max_scan_items}")
-                        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+                for child in self._iter_candidate_items(root, depth):
+                    diagnosis["items_scanned"] += 1
+                    if diagnosis["items_scanned"] > max_items:
+                        diagnosis["limit_reached"] = True
+                        logger.warning(f"扫描达到上限：{max_items}")
+                        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
                     try:
                         if self._is_protected(child, protect_dirs, protect_keywords):
+                            diagnosis["protected_skipped"] += 1
                             continue
                         stat = child.stat()
                         if recent_seconds and now - stat.st_mtime < recent_seconds:
+                            diagnosis["recent_skipped"] += 1
                             continue
                         size = self._path_size(child)
                         if size <= 0:
+                            diagnosis["zero_size_skipped"] += 1
                             continue
                         age_days = max(0, int((now - stat.st_mtime) / 86400))
                         size_gb = size / 1024 ** 3
@@ -395,10 +433,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             "type": "目录" if child.is_dir() else "文件",
                         })
                     except Exception as e:
+                        diagnosis["error_skipped"] += 1
                         logger.debug(f"扫描候选失败 {child}: {e}")
             except Exception as e:
+                diagnosis["error_skipped"] += 1
                 logger.warning(f"扫描媒体目录失败 {root}: {e}")
-        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
 
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
@@ -413,7 +453,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return selected
 
     def _notify_report(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
-                       selected: List[Dict[str, Any]], needed_gb: float):
+                       selected: List[Dict[str, Any]], needed_gb: float, scan_paths: Optional[List[str]] = None,
+                       diagnosis: Optional[Dict[str, Any]] = None):
         if not self._notify:
             return
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
@@ -421,9 +462,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "硬盘空间自动清理：空间不足提醒",
             f"监控路径：{monitor_path}",
             f"剩余空间：{free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
+            f"实际扫描：{', '.join(scan_paths or []) or '未匹配到扫描路径'}",
             f"目标还需释放：{needed_gb:.1f}GB",
             f"建议候选：{len(selected)} 个，预计可释放 {reclaim_gb:.1f}GB",
-            "当前为 v1.0 安全报告模式：未删除任何文件。",
+            f"诊断：{self._diagnosis_text(diagnosis)}",
+            "当前为 v1.3 安全报告模式：未删除任何文件。",
         ]
         if selected:
             lines.append("建议清理样例：")
@@ -435,7 +478,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             logger.warning(f"发送硬盘空间自动清理通知失败：{e}")
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
-                     selected: List[Dict[str, Any]], summary: str):
+                     selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
+                     diagnosis: Optional[Dict[str, Any]] = None):
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
         record = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -448,6 +492,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "reclaim_gb": reclaim_gb,
             "reclaim_text": f"{reclaim_gb:.1f}GB",
             "summary": summary,
+            "scan_paths": scan_paths or [],
+            "scan_paths_text": ", ".join(scan_paths or []),
+            "diagnosis": diagnosis or {},
+            "diagnosis_text": self._diagnosis_text(diagnosis),
             "candidates": [
                 {
                     "path": x.get("path"),
@@ -473,6 +521,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "enabled": self._enabled,
                 "dry_run": True,
                 "notify": self._notify,
+                "run_once": self._run_once,
                 "monitor_paths": self._monitor_paths,
                 "media_paths": self._media_paths,
                 "path_mappings": self._path_mappings,
@@ -481,6 +530,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "scan_interval_minutes": self._scan_interval_minutes,
                 "max_candidates": self._max_candidates,
                 "max_scan_items": self._max_scan_items,
+                "candidate_depth": self._candidate_depth,
                 "recent_days_protect": self._recent_days_protect,
                 "protect_dirs": self._protect_dirs,
                 "protect_keywords": self._protect_keywords,
@@ -542,6 +592,44 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 return True
         return False
 
+
+    def _iter_candidate_items(self, root: Path, depth: int):
+        """按候选深度产出候选项。depth=2 可识别 /link5/电影/电影A。"""
+        depth = max(1, int(depth or 1))
+
+        def walk(current: Path, level: int):
+            try:
+                children = list(current.iterdir())
+            except Exception:
+                return
+            for child in children:
+                if level >= depth or child.is_file():
+                    yield child
+                elif child.is_dir():
+                    yield from walk(child, level + 1)
+
+        yield from walk(root, 1)
+
+    @staticmethod
+    def _diagnosis_text(diagnosis: Optional[Dict[str, Any]]) -> str:
+        if not diagnosis:
+            return ""
+        parts = [
+            f"扫描{diagnosis.get('items_scanned', 0)}项",
+            f"保护跳过{diagnosis.get('protected_skipped', 0)}",
+            f"最近保护跳过{diagnosis.get('recent_skipped', 0)}",
+            f"空大小跳过{diagnosis.get('zero_size_skipped', 0)}",
+            f"缺失路径{diagnosis.get('roots_missing', 0)}",
+            f"候选深度{diagnosis.get('candidate_depth', '')}",
+        ]
+        if diagnosis.get('limit_reached'):
+            parts.append("已达扫描上限")
+        if diagnosis.get('roots_unsafe'):
+            parts.append(f"安全跳过{diagnosis.get('roots_unsafe')}")
+        if diagnosis.get('error_skipped'):
+            parts.append(f"错误跳过{diagnosis.get('error_skipped')}")
+        return "；".join(str(x) for x in parts if x)
+
     def _path_size(self, path: Path) -> int:
         if path.is_file():
             try:
@@ -561,6 +649,15 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 except Exception:
                     pass
         return total
+
+    @staticmethod
+    def _is_relative_to(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except Exception:
+            return False
+
     def _media_paths_for_monitor(self, monitor_path: Path) -> List[str]:
         """
         根据路径映射，推断当前监控硬盘对应的媒体扫描路径。
@@ -576,10 +673,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             try:
                 src_path = Path(src)
                 dst_path = Path(dst)
-                if monitor_path.resolve() == src_path.resolve():
-                    return [dst_path.as_posix()]
-                elif monitor_path.resolve().is_relative_to(src_path.resolve()):
-                    return [dst_path.as_posix()]
+                monitor_resolved = monitor_path.resolve(strict=False)
+                src_resolved = src_path.resolve(strict=False)
+                if monitor_resolved == src_resolved or self._is_relative_to(monitor_resolved, src_resolved):
+                    return [x.strip() for x in dst.split(",") if x.strip()]
             except Exception:
                 continue
         # 2. 没有匹配到映射，使用默认媒体路径
