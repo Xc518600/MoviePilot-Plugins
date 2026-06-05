@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.4 默认只报告，不删除任何文件，按类型分组显示候选清单。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.5 默认只报告，不删除任何文件，按类型分组显示候选清单，智能识别避免电视剧缺集。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -644,10 +644,40 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return False
 
 
-    def _iter_candidate_items(self, root: Path, depth: int):
-        """按候选深度产出候选项。depth=2 可识别 /link5/电影/电影A。"""
-        depth = max(1, int(depth or 1))
+    def _detect_root_type(self, path: Path) -> str:
+        """检测根目录类型（电视剧/电影/其他）。"""
+        path_str = path.as_posix().lower()
+        
+        # 电视剧关键词
+        tv_keywords = ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]
+        for keyword in tv_keywords:
+            if keyword in path_str:
+                return "电视剧"
+        
+        # 电影关键词
+        movie_keywords = ["/电影/", "/movie/", "/movies/"]
+        for keyword in movie_keywords:
+            if keyword in path_str:
+                return "电影"
+        
+        return "其他"
 
+    def _iter_candidate_items(self, root: Path, depth: int):
+        """按候选深度产出候选项。电视剧根目录只扫描第一级子目录（剧集名），避免删除单季导致缺集。"""
+        depth = max(1, int(depth or 1))
+        root_type = self._detect_root_type(root)
+        
+        # 电视剧根目录：只扫描第一级子目录（剧集名）
+        if root_type == "电视剧":
+            try:
+                for child in root.iterdir():
+                    if child.is_dir():
+                        yield child
+            except Exception as e:
+                logger.debug(f"扫描电视剧根目录失败 {root}: {e}")
+            return
+        
+        # 电影和其他根目录：按配置深度扫描
         def walk(current: Path, level: int):
             try:
                 children = list(current.iterdir())
