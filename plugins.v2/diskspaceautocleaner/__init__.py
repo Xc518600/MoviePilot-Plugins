@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.1 默认只报告，不删除任何文件。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.2 默认只报告，不删除任何文件。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -36,6 +36,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _protect_keywords = ""
     _history_limit = 50
     _history: List[Dict[str, Any]] = []
+    _run_once = False
 
     _timer: Optional[threading.Timer] = None
     _lock = threading.Lock()
@@ -59,8 +60,15 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._history_limit = int(config.get("history_limit") or 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
+            self._run_once = bool(config.get("run_once", False))
 
         self.stop_service()
+        if self._run_once:
+            logger.info("硬盘空间自动清理收到配置页立即运行请求")
+            self._run_once = False
+            self._persist_config()
+            threading.Thread(target=self._run_check, daemon=True).start()
+
         if self._enabled:
             logger.info(
                 f"硬盘空间自动清理已启用：dry_run={self._dry_run}, interval={self._scan_interval_minutes}min, "
@@ -112,12 +120,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.1，不删除任何文件"}}]
+                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.2，不删除任何文件"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即运行一次", "hint": "打开后保存配置，会立刻执行一次检查并自动关闭"}}]
                             },
                             {
                                 "component": "VCol",
@@ -187,6 +200,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "enabled": False,
             "dry_run": True,
             "notify": True,
+            "run_once": False,
             "monitor_paths": "",
             "media_paths": "",
             "path_mappings": "",
@@ -225,7 +239,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             "component": "VCardActions",
                             "props": {"class": "justify-end"},
                             "content": [
-                                {"component": "VBtn", "props": {"label": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now"}}
+                                {"component": "VBtn", "props": {"text": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now"}}
                             ]
                         }
                     ]
@@ -254,7 +268,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return [
             {
                 "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.1：支持路径映射和立即运行；只报告，不删除任何文件。"}
+                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.2：支持路径映射；配置页支持保存后立即运行一次；只报告，不删除任何文件。"}
             },
             {
                 "component": "VCard",
@@ -270,7 +284,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         "component": "VCardActions",
                         "props": {"class": "justify-end"},
                         "content": [
-                            {"component": "VBtn", "props": {"label": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now", "loading": False}}
+                            {"component": "VBtn", "props": {"text": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now", "loading": False}}
                         ]
                     }
                 ]
