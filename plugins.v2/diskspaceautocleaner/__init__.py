@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时生成老旧电影或电视剧清理建议。v1.0 默认只报告，不删除任何文件。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.1 默认只报告，不删除任何文件。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -25,6 +25,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _dry_run = True
     _monitor_paths = ""
     _media_paths = ""
+    _path_mappings = ""
     _min_free_gb = 300
     _target_free_gb = 500
     _scan_interval_minutes = 60
@@ -46,6 +47,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._dry_run = bool(config.get("dry_run", True))
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
+            self._path_mappings = config.get("path_mappings") or ""
             self._min_free_gb = int(config.get("min_free_gb") or 300)
             self._target_free_gb = int(config.get("target_free_gb") or 500)
             self._scan_interval_minutes = int(config.get("scan_interval_minutes") or 60)
@@ -76,7 +78,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [
+            {
+                "path": "/run_now",
+                "summary": "立即运行空间检查",
+                "description": "手动触发硬盘空间检查并生成清理建议，不受定时检查间隔限制。",
+                "methods": ["POST"]
+            }
+        ]
 
     def stop_service(self):
         with self._lock:
@@ -103,7 +112,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.0 固定只报告，不删除任何文件"}}]
+                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.1，不删除任何文件"}}]
                             },
                             {
                                 "component": "VCol",
@@ -118,7 +127,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "media_paths", "label": "媒体扫描路径", "rows": 4, "placeholder": "/media/电影\n/media/电视剧", "hint": "空间不足时扫描这些目录，生成建议清理列表"}}]
+                                "content": [{"component": "VTextarea", "props": {"model": "media_paths", "label": "默认媒体扫描路径", "rows": 4, "placeholder": "/media/电影\n/media/电视剧", "hint": "没有匹配到路径映射时，才扫描这些默认目录"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [{"component": "VTextarea", "props": {"model": "path_mappings", "label": "硬盘路径到媒体库路径映射", "rows": 4, "placeholder": "/硬盘5=>/link5\n/vol5=>/link5", "hint": "当某个监控硬盘空间不足时，只扫描它对应的媒体库存放路径。格式：监控路径=>媒体库路径，每行一个。例：硬盘5 对应 link5"}}]
                             },
                             {
                                 "component": "VCol",
@@ -175,6 +189,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "notify": True,
             "monitor_paths": "",
             "media_paths": "",
+            "path_mappings": "",
             "min_free_gb": 300,
             "target_free_gb": 500,
             "scan_interval_minutes": 60,
@@ -185,15 +200,41 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "protect_keywords": "",
             "history_limit": 50,
             "history": [],
+            "sources": "immediate",
         }
 
     def get_page(self) -> List[dict]:
         history = list(self._history or [])[: self._history_limit]
         if not history:
-            return [{
-                "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "暂无硬盘空间检查记录。启用插件后会按间隔检查并生成建议。"}
-            }]
+            return [
+                {
+                    "component": "VAlert",
+                    "props": {"type": "info", "variant": "tonal", "text": "暂无硬盘空间检查记录。启用插件后会按间隔检查并生成建议。"}
+                },
+                {
+                    "component": "VCard",
+                    "props": {"class": "mb-4"},
+                    "content": [
+                        {
+                            "component": "VCardText",
+                            "content": [
+                                {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查并生成清理建议，不受定时检查间隔限制。"}
+                            ],
+                        },
+                        {
+                            "component": "VCardActions",
+                            "props": {"class": "justify-end"},
+                            "content": [
+                                {"component": "VBtn", "props": {"label": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now"}}
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "component": "VAlert",
+                    "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。"}
+                },
+            ]
 
         rows = []
         for idx, item in enumerate(history, start=1):
@@ -213,7 +254,30 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return [
             {
                 "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.0：只报告，不删除任何文件。"}
+                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.1：支持路径映射和立即运行；只报告，不删除任何文件。"}
+            },
+            {
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {
+                        "component": "VCardText",
+                        "content": [
+                            {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查并生成清理建议，不受定时检查间隔限制。"}
+                        ],
+                    },
+                    {
+                        "component": "VCardActions",
+                        "props": {"class": "justify-end"},
+                        "content": [
+                            {"component": "VBtn", "props": {"label": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now", "loading": False}}
+                        ]
+                    }
+                ]
+            },
+            {
+                "component": "VAlert",
+                "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。"}
             },
             {
                 "component": "VTable",
@@ -269,14 +333,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if free_gb >= self._min_free_gb:
                 self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议")
                 continue
-            candidates = self._build_candidates()
+            candidates = self._build_candidates(mpath)
             needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
             self._save_record(mpath, free_gb, total_gb, free_percent, selected, "空间不足，已生成建议清理列表")
             self._notify_report(mpath, free_gb, total_gb, free_percent, selected, needed_gb)
 
-    def _build_candidates(self) -> List[Dict[str, Any]]:
-        media_paths = self._lines(self._media_paths)
+    def _build_candidates(self, monitor_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+        media_paths = self._media_paths_for_monitor(monitor_path)
         protect_dirs = [Path(p).as_posix().rstrip("/") for p in self._lines(self._protect_dirs)]
         protect_keywords = [k.lower() for k in self._lines(self._protect_keywords)]
         candidates = []
@@ -397,6 +461,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "notify": self._notify,
                 "monitor_paths": self._monitor_paths,
                 "media_paths": self._media_paths,
+                "path_mappings": self._path_mappings,
                 "min_free_gb": self._min_free_gb,
                 "target_free_gb": self._target_free_gb,
                 "scan_interval_minutes": self._scan_interval_minutes,
@@ -415,6 +480,27 @@ class DiskSpaceAutoCleaner(_PluginBase):
     @staticmethod
     def _lines(text: str) -> List[str]:
         return [x.strip() for x in str(text or "").splitlines() if x.strip()]
+
+
+    def handle_run_now(self) -> Dict[str, Any]:
+        """
+        插件页面“立即运行检查”按钮触发的 API。
+        手动执行一次空间检查并生成清理建议。
+        """
+        try:
+            self._check_space_and_report()
+            return {
+                "success": True,
+                "message": "空间检查已完成，结果请查看下方表格",
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            }
+        except Exception as e:
+            logger.error(f"硬盘空间自动清理立即运行失败：{e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            }
 
     @staticmethod
     def _format_size(size: int) -> str:
@@ -461,3 +547,28 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 except Exception:
                     pass
         return total
+    def _media_paths_for_monitor(self, monitor_path: Path) -> List[str]:
+        """
+        根据路径映射，推断当前监控硬盘对应的媒体扫描路径。
+        返回：要扫描的媒体路径列表
+        """
+        # 1. 尝试通过 path_mappings 精确匹配监控路径
+        for line in self._lines(self._path_mappings):
+            if '=>' not in line:
+                continue
+            src, dst = [x.strip() for x in line.split('=>', 1)]
+            if not src or not dst:
+                continue
+            try:
+                src_path = Path(src)
+                dst_path = Path(dst)
+                if monitor_path.resolve() == src_path.resolve():
+                    return [dst_path.as_posix()]
+                elif monitor_path.resolve().is_relative_to(src_path.resolve()):
+                    return [dst_path.as_posix()]
+            except Exception:
+                continue
+        # 2. 没有匹配到映射，使用默认媒体路径
+        return self._lines(self._media_paths)
+
+
