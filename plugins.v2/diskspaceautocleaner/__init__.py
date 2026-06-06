@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.0 修复开关布尔值识别，并在关闭安全模式时执行真实删除。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.1 优化单次删除上限，跳过超限完整媒体并继续选择符合大小的候选。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -208,7 +208,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "max_delete_gb", "label": "每次删除最大空间GB", "type": "number", "placeholder": "1000", "hint": "单次清理时最多删除的空间限制，避免一次性删除过多。0 表示不限制"}}]
+                                "content": [{"component": "VTextField", "props": {"model": "max_delete_gb", "label": "每次删除最大空间GB", "type": "number", "placeholder": "1000", "hint": "单次清理最多删除多少GB；只按完整电影/完整电视剧目录删除，不拆分单集/单季。0 表示不限制"}}]
                             },
                             {
                                 "component": "VCol",
@@ -481,6 +481,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
         selected = []
         total = 0.0
         max_delete_gb = float(self._max_delete_gb if self._max_delete_gb is not None else 1000)
+        skipped_oversize = 0
+        skipped_total_limit = 0
         
         for item in candidates:
             # 检查候选数量限制
@@ -491,14 +493,27 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if needed_gb > 0 and total >= needed_gb:
                 break
             
-            # 检查单次删除最大空间限制
+            # 单次删除上限按“完整媒体项”判断：完整电视剧/电影超过上限就跳过，不能拆分删除
             item_size_gb = float(item.get("size_gb") or 0)
+            item_name = item.get("name") or item.get("path") or "未知媒体"
+            if max_delete_gb > 0 and item_size_gb > max_delete_gb:
+                skipped_oversize += 1
+                logger.info(f"候选项超过单次删除上限，跳过完整媒体：{item_name} {item_size_gb:.1f}GB > {max_delete_gb:.1f}GB")
+                continue
+            
+            # 加入这个完整媒体后超过总上限，也跳过并继续找后面的更小候选
             if max_delete_gb > 0 and total + item_size_gb > max_delete_gb:
-                logger.info(f"达到单次删除最大空间限制 {max_delete_gb}GB，停止添加候选项")
-                break
+                skipped_total_limit += 1
+                logger.info(f"加入候选会超过单次删除总上限，跳过完整媒体：{item_name}，当前{total:.1f}GB + {item_size_gb:.1f}GB > {max_delete_gb:.1f}GB")
+                continue
             
             selected.append(item)
             total += item_size_gb
+        
+        if max_delete_gb > 0 and not selected and skipped_oversize:
+            logger.warning(f"找到候选但均超过单次删除上限 {max_delete_gb:.1f}GB；请调大“每次删除最大空间GB”或降低保护条件")
+        elif skipped_oversize or skipped_total_limit:
+            logger.info(f"单次删除上限筛选完成：已选{len(selected)}项 {total:.1f}GB，跳过超单项上限{skipped_oversize}项，跳过总量超限{skipped_total_limit}项")
         
         return selected
 
