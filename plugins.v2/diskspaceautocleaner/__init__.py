@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.8 添加每次删除最大空间限制，避免一次性删除过多。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.9 修复配置保存问题，正确读取启用状态和安全模式设置。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.8"
+    plugin_version = "1.9"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -350,6 +350,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._schedule_next(initial=False)
 
     def _check_space_and_report(self):
+        if not self._enabled:
+            logger.info("硬盘空间自动清理插件未启用，跳过检查")
+            return
         monitor_paths = self._lines(self._monitor_paths)
         if not monitor_paths:
             logger.warning("硬盘空间自动清理未配置监控路径")
@@ -611,7 +614,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 config = {}
             config.update({
                 "enabled": self._enabled,
-                "dry_run": True,
+                "dry_run": self._dry_run,
                 "notify": self._notify,
                 "run_once": self._run_once,
                 "monitor_paths": self._monitor_paths,
