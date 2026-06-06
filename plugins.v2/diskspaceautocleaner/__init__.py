@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.4 修复历史记录保存覆盖用户配置的问题。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.5 仅真实删除成功后发送通知，避免定时检查刷屏。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.4"
+    plugin_version = "2.5"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -412,7 +412,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 selected_for_record = selected
                 summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
             self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, scan_paths=scan_paths, diagnosis=diagnosis)
-            self._notify_report(mpath, free_gb, total_gb, free_percent, selected_for_record, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis, delete_errors=delete_errors)
+            if deleted:
+                self._notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis, delete_errors=delete_errors)
+            elif delete_errors:
+                logger.warning(f"硬盘空间自动清理本次未成功删除文件，不发送通知；失败{len(delete_errors)}项")
+            else:
+                logger.info("硬盘空间自动清理本次未执行真实删除，不发送通知")
 
     def _build_candidates(self, monitor_path: Optional[Path] = None, scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
