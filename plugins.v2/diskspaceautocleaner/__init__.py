@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.2 修复配置页保存后数值回到默认值的问题。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.3 恢复精简通知并避免安全模式文案误导。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -423,7 +423,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "scan_paths": media_paths,
             "roots_total": len(media_paths),
             "roots_missing": 0,
-            "roots_unsafe": 0,
+            "roots_rejected": 0,
             "items_scanned": 0,
             "protected_skipped": 0,
             "recent_skipped": 0,
@@ -444,8 +444,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 logger.warning(f"媒体扫描路径不存在或不是目录：{root}")
                 continue
             if not self._is_safe_root(root):
-                diagnosis["roots_unsafe"] += 1
-                logger.warning(f"媒体扫描路径被安全规则跳过：{root}")
+                diagnosis["roots_rejected"] += 1
+                logger.warning(f"媒体扫描路径被路径规则跳过：{root}")
                 continue
             try:
                 for child in self._iter_candidate_items(root, depth):
@@ -545,7 +545,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     errors.append(msg)
                     continue
                 if not self._is_safe_root(path):
-                    msg = f"跳过不安全路径：{path}"
+                    msg = f"跳过不符合路径规则的路径：{path}"
                     logger.warning(msg)
                     errors.append(msg)
                     continue
@@ -582,7 +582,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "",
                 "⚠️ 未找到符合条件的删除候选",
                 "",
-                "💡 当前为安全报告模式：未删除任何文件。" if self._dry_run else "⚠️ 自动清理模式：未找到可删除候选。"
+                "💡 本次仅生成报告，未删除文件。" if self._dry_run else "⚠️ 自动清理已启用，但未找到可删除候选。"
             ]
         else:
             # 有候选删除项，发送简洁的删除/建议通知
@@ -612,7 +612,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             lines.append("")
             if delete_errors:
                 lines.append(f"⚠️ 删除失败：{len(delete_errors)}项，请查看日志。")
-            lines.append("💡 当前为安全报告模式：未删除任何文件。" if self._dry_run else "✅ 已关闭安全模式，本次已执行真实删除。")
+            lines.append("💡 本次仅生成报告，未删除文件。" if self._dry_run else "✅ 本次已执行自动清理。")
         
         try:
             self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理", text="\n".join(lines))
@@ -886,8 +886,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
         ]
         if diagnosis.get('limit_reached'):
             parts.append("已达扫描上限")
-        if diagnosis.get('roots_unsafe'):
-            parts.append(f"安全跳过{diagnosis.get('roots_unsafe')}")
+        rejected_roots = diagnosis.get('roots_rejected', diagnosis.get('roots_unsafe', 0))
+        if rejected_roots:
+            parts.append(f"路径规则跳过{rejected_roots}")
         if diagnosis.get('error_skipped'):
             parts.append(f"错误跳过{diagnosis.get('error_skipped')}")
         return "；".join(str(x) for x in parts if x)
