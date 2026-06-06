@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.1 优化单次删除上限，跳过超限完整媒体并继续选择符合大小的候选。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.2 修复配置页保存后数值回到默认值的问题。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -51,17 +51,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
             self._path_mappings = config.get("path_mappings") or ""
-            self._min_free_gb = int(config.get("min_free_gb") or 300)
-            self._target_free_gb = int(config.get("target_free_gb") or 500)
-            self._scan_interval_minutes = int(config.get("scan_interval_minutes") or 60)
-            self._max_candidates = int(config.get("max_candidates") or 30)
-            self._max_scan_items = int(config.get("max_scan_items") or 5000)
-            self._candidate_depth = int(config.get("candidate_depth") or 2)
-            self._recent_days_protect = int(config.get("recent_days_protect") or 30)
-            self._max_delete_gb = int(config.get("max_delete_gb") if config.get("max_delete_gb") not in (None, "") else 1000)
+            self._min_free_gb = self._to_int(config.get("min_free_gb"), 300)
+            self._target_free_gb = self._to_int(config.get("target_free_gb"), 500)
+            self._scan_interval_minutes = self._to_int(config.get("scan_interval_minutes"), 60)
+            self._max_candidates = self._to_int(config.get("max_candidates"), 30)
+            self._max_scan_items = self._to_int(config.get("max_scan_items"), 5000)
+            self._candidate_depth = self._to_int(config.get("candidate_depth"), 2)
+            self._recent_days_protect = self._to_int(config.get("recent_days_protect"), 30)
+            self._max_delete_gb = self._to_int(config.get("max_delete_gb"), 1000)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
-            self._history_limit = int(config.get("history_limit") or 50)
+            self._history_limit = self._to_int(config.get("history_limit"), 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
             self._run_once = self._to_bool(config.get("run_once"), False)
@@ -103,6 +103,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if text in {"false", "0", "no", "n", "off", "禁用", "关闭", "否", ""}:
             return False
         return default
+
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        """兼容 MoviePilot 配置中数字可能以字符串形式传入，并保留 0。"""
+        if value is None or value == "":
+            return default
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return default
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -230,25 +240,25 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 ]
             }
         ], {
-            "enabled": False,
-            "dry_run": True,
-            "notify": True,
-            "run_once": False,
-            "monitor_paths": "",
-            "media_paths": "",
-            "path_mappings": "",
-            "min_free_gb": 300,
-            "target_free_gb": 500,
-            "scan_interval_minutes": 60,
-            "max_candidates": 30,
-            "max_scan_items": 5000,
-            "candidate_depth": 2,
-            "recent_days_protect": 30,
-            "protect_dirs": "",
-            "protect_keywords": "",
-            "history_limit": 50,
-            "max_delete_gb": 1000,
-            "history": [],
+            "enabled": self._enabled,
+            "dry_run": self._dry_run,
+            "notify": self._notify,
+            "run_once": self._run_once,
+            "monitor_paths": self._monitor_paths,
+            "media_paths": self._media_paths,
+            "path_mappings": self._path_mappings,
+            "min_free_gb": self._min_free_gb,
+            "target_free_gb": self._target_free_gb,
+            "scan_interval_minutes": self._scan_interval_minutes,
+            "max_candidates": self._max_candidates,
+            "max_scan_items": self._max_scan_items,
+            "candidate_depth": self._candidate_depth,
+            "recent_days_protect": self._recent_days_protect,
+            "protect_dirs": self._protect_dirs,
+            "protect_keywords": self._protect_keywords,
+            "history_limit": self._history_limit,
+            "max_delete_gb": self._max_delete_gb,
+            "history": self._history,
             "sources": "immediate",
         }
 
