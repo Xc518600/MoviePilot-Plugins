@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.3 恢复精简通知并避免安全模式文案误导。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.4 修复历史记录保存覆盖用户配置的问题。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.3"
+    plugin_version = "2.4"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -26,8 +26,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _monitor_paths = ""
     _media_paths = ""
     _path_mappings = ""
-    _min_free_gb = 300
-    _target_free_gb = 500
+    _min_free_gb = 5
+    _target_free_gb = 30
     _scan_interval_minutes = 60
     _max_candidates = 30
     _max_scan_items = 5000
@@ -51,8 +51,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
             self._path_mappings = config.get("path_mappings") or ""
-            self._min_free_gb = self._to_int(config.get("min_free_gb"), 300)
-            self._target_free_gb = self._to_int(config.get("target_free_gb"), 500)
+            self._min_free_gb = self._to_int(config.get("min_free_gb"), 5)
+            self._target_free_gb = self._to_int(config.get("target_free_gb"), 30)
             self._scan_interval_minutes = self._to_int(config.get("scan_interval_minutes"), 60)
             self._max_candidates = self._to_int(config.get("max_candidates"), 30)
             self._max_scan_items = self._to_int(config.get("max_scan_items"), 5000)
@@ -153,7 +153,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "安全报告模式", "hint": "v1.3，不删除任何文件"}}]
+                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "仅生成报告（不删除）", "hint": "开启时只给出清理建议，不删除文件；关闭后才会执行自动清理"}}]
                             },
                             {
                                 "component": "VCol",
@@ -183,12 +183,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "min_free_gb", "label": "触发剩余空间GB", "type": "number", "placeholder": "300"}}]
+                                "content": [{"component": "VTextField", "props": {"model": "min_free_gb", "label": "触发剩余空间GB", "type": "number", "placeholder": "5"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "target_free_gb", "label": "目标剩余空间GB", "type": "number", "placeholder": "500"}}]
+                                "content": [{"component": "VTextField", "props": {"model": "target_free_gb", "label": "目标剩余空间GB", "type": "number", "placeholder": "30"}}]
                             },
                             {
                                 "component": "VCol",
@@ -699,34 +699,23 @@ class DiskSpaceAutoCleaner(_PluginBase):
         self._persist_config()
 
     def _persist_config(self):
+        """
+        仅持久化插件运行时状态，避免定时检查/旧实例保存历史记录时，
+        用内存里的旧配置覆盖用户在页面上刚保存的配置。
+        用户配置项由 MoviePilot 配置页保存流程负责写入；插件内部只更新
+        run_once 自动复位和 history 历史记录。
+        """
         try:
             config = self.get_config() or {}
             if not isinstance(config, dict):
                 config = {}
             config.update({
-                "enabled": self._enabled,
-                "dry_run": self._dry_run,
-                "notify": self._notify,
                 "run_once": self._run_once,
-                "monitor_paths": self._monitor_paths,
-                "media_paths": self._media_paths,
-                "path_mappings": self._path_mappings,
-                "min_free_gb": self._min_free_gb,
-                "target_free_gb": self._target_free_gb,
-                "scan_interval_minutes": self._scan_interval_minutes,
-                "max_candidates": self._max_candidates,
-                "max_scan_items": self._max_scan_items,
-                "candidate_depth": self._candidate_depth,
-                "max_delete_gb": self._max_delete_gb,
-                "recent_days_protect": self._recent_days_protect,
-                "protect_dirs": self._protect_dirs,
-                "protect_keywords": self._protect_keywords,
-                "history_limit": self._history_limit,
                 "history": self._history,
             })
             self.update_config(config)
         except Exception as e:
-            logger.warning(f"保存硬盘空间自动清理配置失败：{e}")
+            logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
 
     @staticmethod
     def _lines(text: str) -> List[str]:
