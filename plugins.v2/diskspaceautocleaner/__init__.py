@@ -12,9 +12,9 @@ from app.schemas import NotificationType
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v1.9 修复配置保存问题，正确读取启用状态和安全模式设置。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.0 修复开关布尔值识别，并在关闭安全模式时执行真实删除。"
     plugin_icon = "harddisk.png"
-    plugin_version = "1.9"
+    plugin_version = "2.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -45,9 +45,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         if config:
-            self._enabled = bool(config.get("enabled", False))
-            self._notify = bool(config.get("notify", True))
-            self._dry_run = bool(config.get("dry_run", True))
+            self._enabled = self._to_bool(config.get("enabled"), False)
+            self._notify = self._to_bool(config.get("notify"), True)
+            self._dry_run = self._to_bool(config.get("dry_run"), True)
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
             self._path_mappings = config.get("path_mappings") or ""
@@ -58,20 +58,23 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._max_scan_items = int(config.get("max_scan_items") or 5000)
             self._candidate_depth = int(config.get("candidate_depth") or 2)
             self._recent_days_protect = int(config.get("recent_days_protect") or 30)
-            self._max_delete_gb = int(config.get("max_delete_gb") or 1000)
+            self._max_delete_gb = int(config.get("max_delete_gb") if config.get("max_delete_gb") not in (None, "") else 1000)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
             self._history_limit = int(config.get("history_limit") or 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
-            self._run_once = bool(config.get("run_once", False))
+            self._run_once = self._to_bool(config.get("run_once"), False)
 
         self.stop_service()
         if self._run_once:
             logger.info("硬盘空间自动清理收到配置页立即运行请求")
             self._run_once = False
             self._persist_config()
-            threading.Thread(target=self._run_check, daemon=True).start()
+            if self._enabled:
+                threading.Thread(target=self._run_check, daemon=True).start()
+            else:
+                logger.info("硬盘空间自动清理未启用，忽略立即运行请求")
 
         if self._enabled:
             logger.info(
@@ -84,6 +87,22 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def get_state(self) -> bool:
         return bool(self._enabled)
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        """兼容 MoviePilot 配置中布尔值可能以字符串/数字形式传入。"""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "y", "on", "启用", "开启", "是"}:
+            return True
+        if text in {"false", "0", "no", "n", "off", "禁用", "关闭", "否", ""}:
+            return False
+        return default
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -374,9 +393,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
             candidates, diagnosis = self._build_candidates(mpath, scan_paths=scan_paths)
             needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
-            summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
-            self._save_record(mpath, free_gb, total_gb, free_percent, selected, summary, scan_paths=scan_paths, diagnosis=diagnosis)
-            self._notify_report(mpath, free_gb, total_gb, free_percent, selected, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis)
+            deleted, delete_errors = ([], [])
+            if selected and not self._dry_run:
+                deleted, delete_errors = self._delete_selected(selected, scan_paths=scan_paths)
+                selected_for_record = deleted
+                summary = "空间不足，已执行自动清理" if deleted else "空间不足，但自动清理未成功；请查看错误日志"
+            else:
+                selected_for_record = selected
+                summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
+            self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, scan_paths=scan_paths, diagnosis=diagnosis)
+            self._notify_report(mpath, free_gb, total_gb, free_percent, selected_for_record, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis, delete_errors=delete_errors)
 
     def _build_candidates(self, monitor_path: Optional[Path] = None, scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
@@ -454,7 +480,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
         total = 0.0
-        max_delete_gb = float(self._max_delete_gb or 1000)
+        max_delete_gb = float(self._max_delete_gb if self._max_delete_gb is not None else 1000)
         
         for item in candidates:
             # 检查候选数量限制
@@ -467,7 +493,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             
             # 检查单次删除最大空间限制
             item_size_gb = float(item.get("size_gb") or 0)
-            if total + item_size_gb > max_delete_gb:
+            if max_delete_gb > 0 and total + item_size_gb > max_delete_gb:
                 logger.info(f"达到单次删除最大空间限制 {max_delete_gb}GB，停止添加候选项")
                 break
             
@@ -476,9 +502,47 @@ class DiskSpaceAutoCleaner(_PluginBase):
         
         return selected
 
+    def _delete_selected(self, selected: List[Dict[str, Any]], scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """安全删除已选候选项。只允许删除位于本次扫描路径下的文件/目录。"""
+        deleted: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        safe_roots = [Path(p).resolve(strict=False) for p in (scan_paths or []) if p]
+        for item in selected:
+            raw_path = item.get("path")
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            try:
+                resolved = path.resolve(strict=False)
+                if not safe_roots or not any(self._is_relative_to(resolved, root) for root in safe_roots):
+                    msg = f"跳过不在扫描路径内的候选：{path}"
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+                if not self._is_safe_root(path):
+                    msg = f"跳过不安全路径：{path}"
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+                if not path.exists():
+                    logger.info(f"候选路径已不存在，视为已清理：{path}")
+                    deleted.append(item)
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                logger.info(f"硬盘空间自动清理已删除：{path}")
+                deleted.append(item)
+            except Exception as e:
+                msg = f"删除失败 {path}: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+        return deleted, errors
+
     def _notify_report(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                        selected: List[Dict[str, Any]], needed_gb: float, scan_paths: Optional[List[str]] = None,
-                       diagnosis: Optional[Dict[str, Any]] = None):
+                       diagnosis: Optional[Dict[str, Any]] = None, delete_errors: Optional[List[str]] = None):
         if not self._notify:
             return
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
@@ -493,11 +557,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "",
                 "⚠️ 未找到符合条件的删除候选",
                 "",
-                "💡 当前为安全报告模式：未删除任何文件。"
+                "💡 当前为安全报告模式：未删除任何文件。" if self._dry_run else "⚠️ 自动清理模式：未找到可删除候选。"
             ]
         else:
-            # 有候选删除项，发送简洁的删除建议通知
-            lines = ["📊 硬盘空间自动清理：删除建议"]
+            # 有候选删除项，发送简洁的删除/建议通知
+            lines = ["📊 硬盘空间自动清理：删除建议" if self._dry_run else "📊 硬盘空间自动清理：已自动清理"]
             
             # 按类型分组候选项
             grouped = self._group_candidates(selected)
@@ -521,7 +585,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             lines.append("")
             lines.append(f"💰 预计释放总空间：{reclaim_gb:.1f}GB")
             lines.append("")
-            lines.append("💡 当前为安全报告模式：未删除任何文件。")
+            if delete_errors:
+                lines.append(f"⚠️ 删除失败：{len(delete_errors)}项，请查看日志。")
+            lines.append("💡 当前为安全报告模式：未删除任何文件。" if self._dry_run else "✅ 已关闭安全模式，本次已执行真实删除。")
         
         try:
             self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理", text="\n".join(lines))
