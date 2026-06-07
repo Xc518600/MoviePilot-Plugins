@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.0.1"
+    plugin_version = "3.0.2"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -485,6 +485,23 @@ class DiskSpaceAutoCleaner(_PluginBase):
             logger.info(f"单次删除上限筛选完成：已选{len(selected)}项 {total:.1f}GB，跳过超单项上限{skipped_oversize}项，跳过总量超限{skipped_total_limit}项")
         
         return selected
+
+    def _persist_config(self):
+        """
+        仅持久化插件运行时状态，避免定时检查或旧实例用内存旧配置
+        覆盖用户刚在页面保存的配置。用户配置项由 MoviePilot 保存流程负责。
+        """
+        try:
+            config = self.get_config() or {}
+            if not isinstance(config, dict):
+                config = {}
+            config.update({
+                "run_once": self._run_once,
+                "history": self._history,
+            })
+            self.update_config(config)
+        except Exception as e:
+            logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
