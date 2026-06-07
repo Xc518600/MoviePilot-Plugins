@@ -103,6 +103,7 @@ class DiskSpaceScanner:
                          rating_cache: Optional[Dict[str, Tuple[float, float]]] = None,
                          rating_cache_lock: Optional[threading.Lock] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
+        root = Path(root)
         candidates: List[Dict[str, Any]] = []
         diagnosis = {
             "items_scanned": 0,
