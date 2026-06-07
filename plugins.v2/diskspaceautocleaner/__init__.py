@@ -249,7 +249,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "enabled": self._enabled,
             "dry_run": self._dry_run,
             "notify": self._notify,
-            "run_once": self._run_once,
+            "run_once": False,
             "monitor_paths": self._monitor_paths,
             "media_paths": self._media_paths,
             "path_mappings": self._path_mappings,
