@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.7"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -412,10 +412,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
             free_gb = usage.free / 1024 ** 3
             total_gb = usage.total / 1024 ** 3
             free_percent = usage.free / usage.total * 100 if usage.total else 0
-            logger.info(f"硬盘空间检查：{mpath} 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)")
+            logger.info(
+                f"硬盘空间检查：{mpath} 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)，"
+                f"触发阈值 {self._min_free_gb}GB，目标剩余 {self._target_free_gb}GB"
+            )
             
             if free_gb >= self._min_free_gb:
-                self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议", scanner._media_paths_for_monitor(mpath))
+                self._save_record(
+                    mpath,
+                    free_gb,
+                    total_gb,
+                    free_percent,
+                    [],
+                    f"空间充足：当前剩余 {free_gb:.1f}GB >= 触发阈值 {self._min_free_gb}GB，未生成清理建议",
+                    scanner._media_paths_for_monitor(mpath)
+                )
                 continue
             
             candidates, diagnosis = scanner.build_candidates(
@@ -427,6 +438,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
             )
             needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
+            logger.info(
+                f"空间不足：当前剩余 {free_gb:.1f}GB < 触发阈值 {self._min_free_gb}GB，"
+                f"目标剩余 {self._target_free_gb}GB，需要释放约 {needed_gb:.1f}GB；"
+                f"扫描候选 {len(candidates)} 项，选中 {len(selected)} 项"
+            )
             deleted, delete_errors = ([], [])
             
             if selected and not self._dry_run:
