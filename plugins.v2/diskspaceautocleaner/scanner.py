@@ -99,7 +99,9 @@ class DiskSpaceScanner:
     
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
-                         size_cache: Dict[str, int], size_cache_lock: threading.Lock) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         size_cache: Dict[str, int], size_cache_lock: threading.Lock,
+                         rating_cache: Optional[Dict[str, Tuple[float, float]]] = None,
+                         rating_cache_lock: Optional[threading.Lock] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         candidates: List[Dict[str, Any]] = []
         diagnosis = {
