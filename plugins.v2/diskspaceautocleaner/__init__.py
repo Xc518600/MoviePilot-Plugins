@@ -480,7 +480,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             total += item_size_gb
         
         if max_delete_gb > 0 and not selected and skipped_oversize:
-            logger.warning(f"找到候选但均超过单次删除上限 {max_delete_gb:.1f}GB；请调大"每次删除最大空间GB"或降低保护条件")
+            logger.warning(f"找到候选但均超过单次删除上限 {max_delete_gb:.1f}GB；请调大“每次删除最大空间GB”或降低保护条件")
         elif skipped_oversize or skipped_total_limit:
             logger.info(f"单次删除上限筛选完成：已选{len(selected)}项 {total:.1f}GB，跳过超单项上限{skipped_oversize}项，跳过总量超限{skipped_total_limit}项")
         

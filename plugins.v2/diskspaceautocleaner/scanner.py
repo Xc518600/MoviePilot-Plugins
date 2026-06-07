@@ -17,10 +17,11 @@ class DiskSpaceScanner:
         self._plugin = plugin_instance
         self._lock = threading.Lock()
     
-    def build_candidates(self, monitor_path: Optional[Path] = None, 
-                        scan_paths: Optional[List[str]] = None,
+    def build_candidates(self,
                         size_cache: Dict[str, int],
                         size_cache_lock: threading.Lock,
+                        monitor_path: Optional[Path] = None,
+                        scan_paths: Optional[List[str]] = None,
                         rating_cache: Optional[Dict[str, Tuple[float, float]]] = None,
                         rating_cache_lock: Optional[threading.Lock] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """构建清理候选列表（使用多线程并行扫描）。"""
