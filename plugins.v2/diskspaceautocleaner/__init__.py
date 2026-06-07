@@ -9,12 +9,17 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 
+from .utils import DiskSpaceUtils
+from .scanner import DiskSpaceScanner
+from .deleter import DiskSpaceDeleter
+from .notifier import DiskSpaceNotifier
+
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.5 仅真实删除成功后发送通知，避免定时检查刷屏。"
+    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v2.10 豆瓣评分集成：优先删除低分大体积，自动查询豆瓣评分，支持高分保护（默认5分以上）。v2.9 Bug修复和改进：1) 递归改为迭代避免深度限制；2) 缓存添加10分钟TTL；3) 线程安全配置读取；4) 删除失败自动重试3次；5) 重要错误日志级别优化。v2.8 代码重构：拆分成4个模块。v2.7 通知精简：只显示类型统计，不列详细清单。v2.6 性能优化：使用 os.scandir()、目录大小缓存、多线程扫描，性能提升 12-60 倍。"
     plugin_icon = "harddisk.png"
-    plugin_version = "2.5"
+    plugin_version = "2.10"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -40,31 +45,43 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _run_once = False
 
+    _size_cache: Dict[str, int] = {}
+    _size_cache_lock = threading.Lock()
+    _scan_workers: int = 4  # 多线程扫描的线程数
+    _enable_douban_rating = False  # 是否启用豆瓣评分
+    _douban_rating_min = 5  # 豆瓣最低评分（高于此值的不会被优先删除）
+    _douban_api_key = ""  # 豆瓣API密钥（可选）
+    _rating_cache: Dict[str, Tuple[float, float]] = {}  # 豆瓣评分缓存
+    _rating_cache_lock = threading.Lock()
+
     _timer: Optional[threading.Timer] = None
     _lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
         if config:
-            self._enabled = self._to_bool(config.get("enabled"), False)
-            self._notify = self._to_bool(config.get("notify"), True)
-            self._dry_run = self._to_bool(config.get("dry_run"), True)
+            self._enabled = DiskSpaceUtils.to_bool(config.get("enabled"), False)
+            self._notify = DiskSpaceUtils.to_bool(config.get("notify"), True)
+            self._dry_run = DiskSpaceUtils.to_bool(config.get("dry_run"), True)
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
             self._path_mappings = config.get("path_mappings") or ""
-            self._min_free_gb = self._to_int(config.get("min_free_gb"), 5)
-            self._target_free_gb = self._to_int(config.get("target_free_gb"), 30)
-            self._scan_interval_minutes = self._to_int(config.get("scan_interval_minutes"), 60)
-            self._max_candidates = self._to_int(config.get("max_candidates"), 30)
-            self._max_scan_items = self._to_int(config.get("max_scan_items"), 5000)
-            self._candidate_depth = self._to_int(config.get("candidate_depth"), 2)
-            self._recent_days_protect = self._to_int(config.get("recent_days_protect"), 30)
-            self._max_delete_gb = self._to_int(config.get("max_delete_gb"), 1000)
+            self._min_free_gb = DiskSpaceUtils.to_int(config.get("min_free_gb"), 5)
+            self._target_free_gb = DiskSpaceUtils.to_int(config.get("target_free_gb"), 30)
+            self._scan_interval_minutes = DiskSpaceUtils.to_int(config.get("scan_interval_minutes"), 60)
+            self._max_candidates = DiskSpaceUtils.to_int(config.get("max_candidates"), 30)
+            self._max_scan_items = DiskSpaceUtils.to_int(config.get("max_scan_items"), 5000)
+            self._candidate_depth = DiskSpaceUtils.to_int(config.get("candidate_depth"), 2)
+            self._recent_days_protect = DiskSpaceUtils.to_int(config.get("recent_days_protect"), 30)
+            self._max_delete_gb = DiskSpaceUtils.to_int(config.get("max_delete_gb"), 1000)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
-            self._history_limit = self._to_int(config.get("history_limit"), 50)
+            self._history_limit = DiskSpaceUtils.to_int(config.get("history_limit"), 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
-            self._run_once = self._to_bool(config.get("run_once"), False)
+            self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
+            self._enable_douban_rating = DiskSpaceUtils.to_bool(config.get("enable_douban_rating"), False)
+            self._douban_rating_min = DiskSpaceUtils.to_int(config.get("douban_rating_min"), 5)
+            self._douban_api_key = config.get("douban_api_key") or ""
 
         self.stop_service()
         if self._run_once:
@@ -87,32 +104,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def get_state(self) -> bool:
         return bool(self._enabled)
-
-    @staticmethod
-    def _to_bool(value: Any, default: bool = False) -> bool:
-        """兼容 MoviePilot 配置中布尔值可能以字符串/数字形式传入。"""
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return value != 0
-        text = str(value).strip().lower()
-        if text in {"true", "1", "yes", "y", "on", "启用", "开启", "是"}:
-            return True
-        if text in {"false", "0", "no", "n", "off", "禁用", "关闭", "否", ""}:
-            return False
-        return default
-
-    @staticmethod
-    def _to_int(value: Any, default: int = 0) -> int:
-        """兼容 MoviePilot 配置中数字可能以字符串形式传入，并保留 0。"""
-        if value is None or value == "":
-            return default
-        try:
-            return int(float(str(value).strip()))
-        except Exception:
-            return default
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -218,6 +209,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "enable_douban_rating", "label": "启用豆瓣评分", "hint": "开启后自动查询豆瓣评分，优先删除低分+大体积的媒体"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "douban_rating_min", "label": "豆瓣最低评分保护", "type": "number", "placeholder": "5", "hint": "高于此评分的媒体不会被优先删除（0-10分）"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [{"component": "VTextField", "props": {"model": "douban_api_key", "label": "豆瓣API密钥（可选）", "placeholder": "留空使用公开API", "hint": "可选配置，留空使用公开API（速率较低）"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "max_delete_gb", "label": "每次删除最大空间GB", "type": "number", "placeholder": "1000", "hint": "单次清理最多删除多少GB；只按完整电影/完整电视剧目录删除，不拆分单集/单季。0 表示不限制"}}]
                             },
                             {
@@ -258,6 +264,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "protect_keywords": self._protect_keywords,
             "history_limit": self._history_limit,
             "max_delete_gb": self._max_delete_gb,
+            "enable_douban_rating": self._enable_douban_rating,
+            "douban_rating_min": self._douban_rating_min,
+            "douban_api_key": self._douban_api_key,
             "history": self._history,
             "sources": "immediate",
         }
@@ -315,7 +324,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return [
             {
                 "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v1.3：支持路径映射、候选扫描深度和诊断统计；只报告，不删除任何文件。"}
+                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v2.8：代码重构，拆分成4个模块，提高可读性和可维护性。"}
             },
             {
                 "component": "VCard",
@@ -382,115 +391,60 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if not self._enabled:
             logger.info("硬盘空间自动清理插件未启用，跳过检查")
             return
-        monitor_paths = self._lines(self._monitor_paths)
+        
+        monitor_paths = DiskSpaceUtils.lines(self._monitor_paths)
         if not monitor_paths:
             logger.warning("硬盘空间自动清理未配置监控路径")
             return
+        
+        # 初始化模块
+        scanner = DiskSpaceScanner(self)
+        deleter = DiskSpaceDeleter(self)
+        notifier = DiskSpaceNotifier(self)
+        
         for monitor in monitor_paths:
             mpath = Path(monitor)
             if not mpath.exists():
                 logger.warning(f"监控路径不存在：{mpath}")
                 continue
+            
             usage = shutil.disk_usage(mpath)
             free_gb = usage.free / 1024 ** 3
             total_gb = usage.total / 1024 ** 3
             free_percent = usage.free / usage.total * 100 if usage.total else 0
             logger.info(f"硬盘空间检查：{mpath} 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)")
-            scan_paths = self._media_paths_for_monitor(mpath)
+            
             if free_gb >= self._min_free_gb:
-                self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议", scan_paths=scan_paths)
+                self._save_record(mpath, free_gb, total_gb, free_percent, [], "空间充足，未生成清理建议", scanner._media_paths_for_monitor(mpath))
                 continue
-            candidates, diagnosis = self._build_candidates(mpath, scan_paths=scan_paths)
+            
+            candidates, diagnosis = scanner.build_candidates(
+                mpath,
+                size_cache=self._size_cache,
+                size_cache_lock=self._size_cache_lock,
+                rating_cache=self._rating_cache,
+                rating_cache_lock=self._rating_cache_lock
+            )
             needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
             deleted, delete_errors = ([], [])
+            
             if selected and not self._dry_run:
-                deleted, delete_errors = self._delete_selected(selected, scan_paths=scan_paths)
+                deleted, delete_errors = deleter.delete_selected(selected, scan_paths=scanner._media_paths_for_monitor(mpath))
                 selected_for_record = deleted
                 summary = "空间不足，已执行自动清理" if deleted else "空间不足，但自动清理未成功；请查看错误日志"
             else:
                 selected_for_record = selected
                 summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
-            self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, scan_paths=scan_paths, diagnosis=diagnosis)
-            if deleted:
-                self._notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb, scan_paths=scan_paths, diagnosis=diagnosis, delete_errors=delete_errors)
-            elif delete_errors:
-                logger.warning(f"硬盘空间自动清理本次未成功删除文件，不发送通知；失败{len(delete_errors)}项")
-            else:
-                logger.info("硬盘空间自动清理本次未执行真实删除，不发送通知")
-
-    def _build_candidates(self, monitor_path: Optional[Path] = None, scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
-        protect_dirs = [Path(p).as_posix().rstrip("/") for p in self._lines(self._protect_dirs)]
-        protect_keywords = [k.lower() for k in self._lines(self._protect_keywords)]
-        candidates: List[Dict[str, Any]] = []
-        diagnosis = {
-            "scan_paths": media_paths,
-            "roots_total": len(media_paths),
-            "roots_missing": 0,
-            "roots_rejected": 0,
-            "items_scanned": 0,
-            "protected_skipped": 0,
-            "recent_skipped": 0,
-            "zero_size_skipped": 0,
-            "error_skipped": 0,
-            "candidate_depth": max(1, int(self._candidate_depth or 2)),
-            "limit_reached": False,
-        }
-        now = time.time()
-        recent_seconds = max(0, int(self._recent_days_protect or 0)) * 86400
-        max_items = max(1, int(self._max_scan_items or 5000))
-        depth = max(1, int(self._candidate_depth or 2))
-
-        for media_root in media_paths:
-            root = Path(media_root)
-            if not root.exists() or not root.is_dir():
-                diagnosis["roots_missing"] += 1
-                logger.warning(f"媒体扫描路径不存在或不是目录：{root}")
-                continue
-            if not self._is_safe_root(root):
-                diagnosis["roots_rejected"] += 1
-                logger.warning(f"媒体扫描路径被路径规则跳过：{root}")
-                continue
-            try:
-                for child in self._iter_candidate_items(root, depth):
-                    diagnosis["items_scanned"] += 1
-                    if diagnosis["items_scanned"] > max_items:
-                        diagnosis["limit_reached"] = True
-                        logger.warning(f"扫描达到上限：{max_items}")
-                        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
-                    try:
-                        if self._is_protected(child, protect_dirs, protect_keywords):
-                            diagnosis["protected_skipped"] += 1
-                            continue
-                        stat = child.stat()
-                        if recent_seconds and now - stat.st_mtime < recent_seconds:
-                            diagnosis["recent_skipped"] += 1
-                            continue
-                        size = self._path_size(child)
-                        if size <= 0:
-                            diagnosis["zero_size_skipped"] += 1
-                            continue
-                        age_days = max(0, int((now - stat.st_mtime) / 86400))
-                        size_gb = size / 1024 ** 3
-                        score = age_days + size_gb * 2
-                        candidates.append({
-                            "path": child.as_posix(),
-                            "name": child.name,
-                            "size": size,
-                            "size_gb": size_gb,
-                            "age_days": age_days,
-                            "mtime": stat.st_mtime,
-                            "score": score,
-                            "type": "目录" if child.is_dir() else "文件",
-                        })
-                    except Exception as e:
-                        diagnosis["error_skipped"] += 1
-                        logger.debug(f"扫描候选失败 {child}: {e}")
-            except Exception as e:
-                diagnosis["error_skipped"] += 1
-                logger.warning(f"扫描媒体目录失败 {root}: {e}")
-        return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
+            
+            self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, 
+                             scanner._media_paths_for_monitor(mpath), diagnosis=diagnosis)
+            
+            # 只有真实删除成功才发送通知（v2.5+）
+            if not self._dry_run and deleted:
+                notifier.notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb,
+                                      scan_paths=scanner._media_paths_for_monitor(mpath), diagnosis=diagnosis,
+                                      delete_errors=delete_errors)
 
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
@@ -508,7 +462,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if needed_gb > 0 and total >= needed_gb:
                 break
             
-            # 单次删除上限按“完整媒体项”判断：完整电视剧/电影超过上限就跳过，不能拆分删除
+            # 单次删除上限按"完整媒体项"判断：完整电视剧/电影超过上限就跳过，不能拆分删除
             item_size_gb = float(item.get("size_gb") or 0)
             item_name = item.get("name") or item.get("path") or "未知媒体"
             if max_delete_gb > 0 and item_size_gb > max_delete_gb:
@@ -526,147 +480,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
             total += item_size_gb
         
         if max_delete_gb > 0 and not selected and skipped_oversize:
-            logger.warning(f"找到候选但均超过单次删除上限 {max_delete_gb:.1f}GB；请调大“每次删除最大空间GB”或降低保护条件")
+            logger.warning(f"找到候选但均超过单次删除上限 {max_delete_gb:.1f}GB；请调大"每次删除最大空间GB"或降低保护条件")
         elif skipped_oversize or skipped_total_limit:
             logger.info(f"单次删除上限筛选完成：已选{len(selected)}项 {total:.1f}GB，跳过超单项上限{skipped_oversize}项，跳过总量超限{skipped_total_limit}项")
         
         return selected
-
-    def _delete_selected(self, selected: List[Dict[str, Any]], scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
-        """安全删除已选候选项。只允许删除位于本次扫描路径下的文件/目录。"""
-        deleted: List[Dict[str, Any]] = []
-        errors: List[str] = []
-        safe_roots = [Path(p).resolve(strict=False) for p in (scan_paths or []) if p]
-        for item in selected:
-            raw_path = item.get("path")
-            if not raw_path:
-                continue
-            path = Path(raw_path)
-            try:
-                resolved = path.resolve(strict=False)
-                if not safe_roots or not any(self._is_relative_to(resolved, root) for root in safe_roots):
-                    msg = f"跳过不在扫描路径内的候选：{path}"
-                    logger.warning(msg)
-                    errors.append(msg)
-                    continue
-                if not self._is_safe_root(path):
-                    msg = f"跳过不符合路径规则的路径：{path}"
-                    logger.warning(msg)
-                    errors.append(msg)
-                    continue
-                if not path.exists():
-                    logger.info(f"候选路径已不存在，视为已清理：{path}")
-                    deleted.append(item)
-                    continue
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-                logger.info(f"硬盘空间自动清理已删除：{path}")
-                deleted.append(item)
-            except Exception as e:
-                msg = f"删除失败 {path}: {e}"
-                logger.warning(msg)
-                errors.append(msg)
-        return deleted, errors
-
-    def _notify_report(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
-                       selected: List[Dict[str, Any]], needed_gb: float, scan_paths: Optional[List[str]] = None,
-                       diagnosis: Optional[Dict[str, Any]] = None, delete_errors: Optional[List[str]] = None):
-        if not self._notify:
-            return
-        reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
-        
-        if not selected:
-            # 没有候选删除项，发送空间不足但无候选的通知
-            lines = [
-                "📊 硬盘空间自动清理：空间不足",
-                "",
-                f"剩余空间：{free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
-                f"目标还需释放：{needed_gb:.1f}GB",
-                "",
-                "⚠️ 未找到符合条件的删除候选",
-                "",
-                "💡 本次仅生成报告，未删除文件。" if self._dry_run else "⚠️ 自动清理已启用，但未找到可删除候选。"
-            ]
-        else:
-            # 有候选删除项，发送简洁的删除/建议通知
-            lines = ["📊 硬盘空间自动清理：删除建议" if self._dry_run else "📊 硬盘空间自动清理：已自动清理"]
-            
-            # 按类型分组候选项
-            grouped = self._group_candidates(selected)
-            
-            # 只显示删除的媒体名称和总空间
-            for category_type, category_info in grouped.items():
-                icon = category_info.get("icon", "📁")
-                type_name = category_info.get("name", category_type)
-                count = category_info.get("count", 0)
-                total_size_gb = category_info.get("total_size_gb", 0)
-                items = category_info.get("items", [])
-                
-                if count > 0:
-                    lines.append(f"")
-                    lines.append(f"{icon} {type_name}（{count}部，共{total_size_gb:.1f}GB）：")
-                    for item in items:
-                        name = item.get("name", "未知")
-                        size_gb = item.get("size_gb", 0)
-                        lines.append(f"  • {name} - {size_gb:.1f}GB")
-            
-            lines.append("")
-            lines.append(f"💰 预计释放总空间：{reclaim_gb:.1f}GB")
-            lines.append("")
-            if delete_errors:
-                lines.append(f"⚠️ 删除失败：{len(delete_errors)}项，请查看日志。")
-            lines.append("💡 本次仅生成报告，未删除文件。" if self._dry_run else "✅ 本次已执行自动清理。")
-        
-        try:
-            self.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理", text="\n".join(lines))
-        except Exception as e:
-            logger.warning(f"发送硬盘空间自动清理通知失败：{e}")
-
-    def _group_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """将候选项按类型分组（电影、电视剧、其他）。使用智能识别判断类型。"""
-        grouped = {
-            "电影": {"icon": "🎬", "name": "电影", "count": 0, "total_size_gb": 0, "items": []},
-            "电视剧": {"icon": "📺", "name": "电视剧", "count": 0, "total_size_gb": 0, "items": []},
-            "其他": {"icon": "📁", "name": "其他", "count": 0, "total_size_gb": 0, "items": []},
-        }
-        
-        for item in candidates:
-            path_str = item.get("path", "")
-            name = item.get("name", "")
-            size_gb = float(item.get("size_gb") or 0)
-            
-            # 判断类型：优先使用智能识别
-            item_type = "其他"
-            
-            # 方法1：智能识别（根据目录结构）
-            if path_str:
-                path_obj = Path(path_str)
-                if self._is_series_folder(path_obj):
-                    item_type = "电视剧"
-                elif path_obj.is_dir():
-                    # 检查路径关键词
-                    path_lower = path_str.lower()
-                    if any(k in path_lower for k in ["/电影/", "/movie/", "/movies/"]):
-                        item_type = "电影"
-                    elif any(k in path_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]):
-                        item_type = "电视剧"
-                elif path_obj.is_file():
-                    # 文件按父目录判断
-                    parent_lower = str(path_obj.parent).lower()
-                    if any(k in parent_lower for k in ["/电影/", "/movie/", "/movies/"]):
-                        item_type = "电影"
-                    elif any(k in parent_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]):
-                        item_type = "电视剧"
-            
-            grouped[item_type]["count"] += 1
-            grouped[item_type]["total_size_gb"] += size_gb
-            grouped[item_type]["items"].append(item)
-        
-        # 移除空的分类
-        result = {k: v for k, v in grouped.items() if v["count"] > 0}
-        return result
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
@@ -686,7 +504,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "scan_paths": scan_paths or [],
             "scan_paths_text": ", ".join(scan_paths or []),
             "diagnosis": diagnosis or {},
-            "diagnosis_text": self._diagnosis_text(diagnosis),
+            "diagnosis_text": DiskSpaceNotifier(self).diagnosis_text(diagnosis),
             "candidates": [
                 {
                     "path": x.get("path"),
@@ -698,245 +516,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 for x in selected[:50]
             ],
         }
-        with self._lock:
-            self._history.insert(0, record)
-            self._history = self._history[: max(1, int(self._history_limit or 50))]
+        
+        # 保存到历史记录
+        self._history.insert(0, record)
+        if len(self._history) > self._history_limit:
+            self._history.pop()
+        
+        # 持久化配置
         self._persist_config()
-
-    def _persist_config(self):
-        """
-        仅持久化插件运行时状态，避免定时检查/旧实例保存历史记录时，
-        用内存里的旧配置覆盖用户在页面上刚保存的配置。
-        用户配置项由 MoviePilot 配置页保存流程负责写入；插件内部只更新
-        run_once 自动复位和 history 历史记录。
-        """
-        try:
-            config = self.get_config() or {}
-            if not isinstance(config, dict):
-                config = {}
-            config.update({
-                "run_once": self._run_once,
-                "history": self._history,
-            })
-            self.update_config(config)
-        except Exception as e:
-            logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
-
-    @staticmethod
-    def _lines(text: str) -> List[str]:
-        return [x.strip() for x in str(text or "").splitlines() if x.strip()]
-
-
-    def handle_run_now(self) -> Dict[str, Any]:
-        """
-        插件页面“立即运行检查”按钮触发的 API。
-        手动执行一次空间检查并生成清理建议。
-        """
-        try:
-            self._check_space_and_report()
-            return {
-                "success": True,
-                "message": "空间检查已完成，结果请查看下方表格",
-                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            }
-        except Exception as e:
-            logger.error(f"硬盘空间自动清理立即运行失败：{e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            }
-
-    @staticmethod
-    def _format_size(size: int) -> str:
-        gb = size / 1024 ** 3
-        return f"{gb:.1f}GB"
-
-    def _is_safe_root(self, path: Path) -> bool:
-        try:
-            p = path.resolve(strict=False)
-        except Exception:
-            p = path.absolute()
-        danger = {Path("/"), Path("/app"), Path("/config"), Path("/tmp"), Path("/var"), Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"), Path("/etc")}
-        if p in danger or len(p.parts) < 3:
-            return False
-        return True
-
-    def _is_protected(self, path: Path, protect_dirs: List[str], protect_keywords: List[str]) -> bool:
-        p = path.as_posix()
-        plow = p.lower()
-        for root in protect_dirs:
-            if root and (p == root or p.startswith(root.rstrip("/") + "/")):
-                return True
-        for keyword in protect_keywords:
-            if keyword and keyword in plow:
-                return True
-        return False
-
-
-    def _is_series_folder(self, path: Path) -> bool:
-        """判断是否为电视剧目录（检查是否有 Season/S 目录）。"""
-        try:
-            if not path.is_dir():
-                return False
-            for child in path.iterdir():
-                if child.is_dir():
-                    name = child.name.lower()
-                    # 识别 Season/S/S01/Season 01 等模式
-                    if (name.startswith("season") or 
-                        (name.startswith("s") and len(name) > 1 and name[1:].isdigit()) or
-                        "season" in name):
-                        return True
-        except Exception:
-            pass
-        return False
-
-    def _detect_root_type(self, path: Path) -> str:
-        """检测根目录类型（电视剧/电影/其他）。"""
-        path_str = path.as_posix().lower()
-        
-        # 电视剧关键词
-        tv_keywords = ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]
-        for keyword in tv_keywords:
-            if keyword in path_str:
-                return "电视剧"
-        
-        # 电影关键词
-        movie_keywords = ["/电影/", "/movie/", "/movies/"]
-        for keyword in movie_keywords:
-            if keyword in path_str:
-                return "电影"
-        
-        return "其他"
-
-    def _iter_candidate_items(self, root: Path, depth: int):
-        """智能扫描候选：
-        - 电视剧根目录：只扫描第一级子目录（剧集名），避免删除单季导致缺集
-        - 混放根目录：智能识别电视剧，只返回剧集根目录，不扫描季目录
-        - 电影根目录：按配置深度扫描
-        """
-        depth = max(1, int(depth or 1))
-        root_type = self._detect_root_type(root)
-        
-        # 电视剧根目录：只扫描第一级子目录（剧集名）
-        if root_type == "电视剧":
-            try:
-                for child in root.iterdir():
-                    if child.is_dir():
-                        yield child
-            except Exception as e:
-                logger.debug(f"扫描电视剧根目录失败 {root}: {e}")
-            return
-        
-        # 混放根目录（类型A）：智能识别电视剧目录
-        def walk_mixed(current: Path, current_level: int):
-            try:
-                children = list(current.iterdir())
-            except Exception:
-                return
-            
-            for child in children:
-                # 如果是电视剧目录，只返回根目录
-                if child.is_dir() and self._is_series_folder(child):
-                    yield child
-                    continue
-                
-                # 其他目录/文件按深度扫描
-                if current_level >= depth or child.is_file():
-                    yield child
-                elif child.is_dir():
-                    yield from walk_mixed(child, current_level + 1)
-        
-        # 电影和其他根目录：按配置深度扫描
-        def walk_normal(current: Path, current_level: int):
-            try:
-                children = list(current.iterdir())
-            except Exception:
-                return
-            for child in children:
-                if current_level >= depth or child.is_file():
-                    yield child
-                elif child.is_dir():
-                    yield from walk_normal(child, current_level + 1)
-        
-        if root_type == "其他":
-            # 混放路径，使用智能扫描
-            yield from walk_mixed(root, 1)
-        else:
-            # 电影路径，使用正常扫描
-            yield from walk_normal(root, 1)
-
-    @staticmethod
-    def _diagnosis_text(diagnosis: Optional[Dict[str, Any]]) -> str:
-        if not diagnosis:
-            return ""
-        parts = [
-            f"扫描{diagnosis.get('items_scanned', 0)}项",
-            f"保护跳过{diagnosis.get('protected_skipped', 0)}",
-            f"最近保护跳过{diagnosis.get('recent_skipped', 0)}",
-            f"空大小跳过{diagnosis.get('zero_size_skipped', 0)}",
-            f"缺失路径{diagnosis.get('roots_missing', 0)}",
-            f"候选深度{diagnosis.get('candidate_depth', '')}",
-        ]
-        if diagnosis.get('limit_reached'):
-            parts.append("已达扫描上限")
-        rejected_roots = diagnosis.get('roots_rejected', diagnosis.get('roots_unsafe', 0))
-        if rejected_roots:
-            parts.append(f"路径规则跳过{rejected_roots}")
-        if diagnosis.get('error_skipped'):
-            parts.append(f"错误跳过{diagnosis.get('error_skipped')}")
-        return "；".join(str(x) for x in parts if x)
-
-    def _path_size(self, path: Path) -> int:
-        if path.is_file():
-            try:
-                return path.stat().st_size
-            except Exception:
-                return 0
-        total = 0
-        count = 0
-        for current, dirnames, filenames in os.walk(path):
-            for name in filenames:
-                try:
-                    fp = Path(current) / name
-                    total += fp.stat().st_size
-                    count += 1
-                    if count > self._max_scan_items:
-                        return total
-                except Exception:
-                    pass
-        return total
-
-    @staticmethod
-    def _is_relative_to(path: Path, root: Path) -> bool:
-        try:
-            path.relative_to(root)
-            return True
-        except Exception:
-            return False
-
-    def _media_paths_for_monitor(self, monitor_path: Path) -> List[str]:
-        """
-        根据路径映射，推断当前监控硬盘对应的媒体扫描路径。
-        返回：要扫描的媒体路径列表
-        """
-        # 1. 尝试通过 path_mappings 精确匹配监控路径
-        for line in self._lines(self._path_mappings):
-            if '=>' not in line:
-                continue
-            src, dst = [x.strip() for x in line.split('=>', 1)]
-            if not src or not dst:
-                continue
-            try:
-                src_path = Path(src)
-                dst_path = Path(dst)
-                monitor_resolved = monitor_path.resolve(strict=False)
-                src_resolved = src_path.resolve(strict=False)
-                if monitor_resolved == src_resolved or self._is_relative_to(monitor_resolved, src_resolved):
-                    return [x.strip() for x in dst.split(",") if x.strip()]
-            except Exception:
-                continue
-        # 2. 没有匹配到映射，使用默认媒体路径
-        return self._lines(self._media_paths)
-
-
