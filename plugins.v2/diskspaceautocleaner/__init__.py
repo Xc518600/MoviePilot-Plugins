@@ -17,7 +17,7 @@ from .notifier import DiskSpaceNotifier
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘/媒体库剩余空间，在空间不足时按路径映射扫描对应媒体库并生成清理建议。v3.0 豆瓣评分集成：优先删除低分大体积，自动查询豆瓣评分，支持高分保护（默认5分以上）。v2.9 Bug修复和改进：1) 递归改为迭代避免深度限制；2) 缓存添加10分钟TTL；3) 线程安全配置读取；4) 删除失败自动重试3次；5) 重要错误日志级别优化。v2.8 代码重构：拆分成4个模块。v2.7 通知精简：只显示类型统计，不列详细清单。v2.6 性能优化：使用 os.scandir()、目录大小缓存、多线程扫描，性能提升 12-60 倍。"
+    plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
     plugin_version = "3.0"
     plugin_author = "老公"
