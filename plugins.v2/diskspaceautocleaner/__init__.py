@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.0.2"
+    plugin_version = "3.0.3"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -419,7 +419,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 continue
             
             candidates, diagnosis = scanner.build_candidates(
-                mpath,
+                monitor_path=mpath,
                 size_cache=self._size_cache,
                 size_cache_lock=self._size_cache_lock,
                 rating_cache=self._rating_cache,
