@@ -187,7 +187,6 @@ class DiskSpaceScanner:
                     douban_score = None
                     
                     if enable_douban:
-                        from .utils import DiskSpaceUtils
                         title = DiskSpaceUtils.extract_movie_title(child)
                         if title and rating_cache and rating_cache_lock:
                             douban_score = DiskSpaceUtils.get_douban_rating(
