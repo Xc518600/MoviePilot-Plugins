@@ -205,11 +205,11 @@ class DiskSpaceUtils:
             
             if api_key:
                 # 使用API Key（如果有）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
+                url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
                 headers = {'Authorization': f'Bearer {api_key}'}
             else:
                 # 使用公开API（速率较低）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
+                url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
                 headers = {}
             logger.info(f"豆瓣评分查询：查询词={title}，使用{'API Key' if api_key else '公开接口'}")
             
