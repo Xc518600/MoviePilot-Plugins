@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.0.7"
+    plugin_version = "3.0.8"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -429,8 +429,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 )
                 continue
             
+            scan_paths = scanner._media_paths_for_monitor(mpath)
+            logger.info(
+                f"空间不足，开始扫描候选：监控路径={mpath}，扫描路径={', '.join(scan_paths) or '未配置'}，"
+                f"深度={self._candidate_depth}，最大条目={self._max_scan_items}，线程={self._scan_workers}"
+            )
             candidates, diagnosis = scanner.build_candidates(
                 monitor_path=mpath,
+                scan_paths=scan_paths,
                 size_cache=self._size_cache,
                 size_cache_lock=self._size_cache_lock,
                 rating_cache=self._rating_cache,
@@ -446,7 +452,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             deleted, delete_errors = ([], [])
             
             if selected and not self._dry_run:
-                deleted, delete_errors = deleter.delete_selected(selected, scan_paths=scanner._media_paths_for_monitor(mpath))
+                deleted, delete_errors = deleter.delete_selected(selected, scan_paths=scan_paths)
                 selected_for_record = deleted
                 summary = "空间不足，已执行自动清理" if deleted else "空间不足，但自动清理未成功；请查看错误日志"
             else:
@@ -454,12 +460,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
             
             self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, 
-                             scanner._media_paths_for_monitor(mpath), diagnosis=diagnosis)
+                             scan_paths, diagnosis=diagnosis)
             
             # 只有真实删除成功才发送通知（v2.5+）
             if not self._dry_run and deleted:
                 notifier.notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb,
-                                      scan_paths=scanner._media_paths_for_monitor(mpath), diagnosis=diagnosis,
+                                      scan_paths=scan_paths, diagnosis=diagnosis,
                                       delete_errors=delete_errors)
 
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
@@ -554,6 +560,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
         self._history.insert(0, record)
         if len(self._history) > self._history_limit:
             self._history.pop()
+        logger.info(
+            f"硬盘空间检查记录已保存：{monitor_path}，摘要={summary}，候选={len(selected)}项，"
+            f"预计释放={reclaim_gb:.1f}GB，扫描耗时={record['diagnosis'].get('scan_time_seconds', 0)}秒"
+        )
         
         # 持久化配置
         self._persist_config()

@@ -54,6 +54,10 @@ class DiskSpaceScanner:
         
         # 使用多线程并行扫描多个媒体根目录
         scan_start_time = time.time()
+        logger.info(
+            f"候选扫描开始：路径={', '.join(media_paths) or '未配置'}，深度={depth}，"
+            f"最大条目={max_items}，线程={self._plugin._scan_workers}"
+        )
         
         with ThreadPoolExecutor(max_workers=self._plugin._scan_workers) as executor:
             # 提交所有扫描任务
@@ -94,6 +98,11 @@ class DiskSpaceScanner:
         if diagnosis["items_scanned"] >= max_items:
             diagnosis["limit_reached"] = True
             logger.warning(f"扫描达到上限：{max_items} 项，耗时 {scan_time:.2f} 秒")
+        logger.info(
+            f"候选扫描完成：候选={len(candidates)}项，扫描={diagnosis['items_scanned']}项，"
+            f"缺失={diagnosis['roots_missing']}，保护跳过={diagnosis['protected_skipped']}，"
+            f"最近跳过={diagnosis['recent_skipped']}，错误={diagnosis['error_skipped']}，耗时={scan_time:.2f}秒"
+        )
         
         return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
     
@@ -148,6 +157,8 @@ class DiskSpaceScanner:
                     
                     # 使用缓存获取大小（兼容TTL缓存）
                     cache_key = f"{child.as_posix()}:{stat.st_mtime}"
+                    needs_calc = False
+                    size = 0
                     with size_cache_lock:
                         if cache_key in size_cache:
                             # 检查是否为TTL缓存（元组格式）
@@ -159,20 +170,19 @@ class DiskSpaceScanner:
                                 if time.time() - cache_time < cache_ttl:
                                     diagnosis["cache_hits"] += 1
                                 else:
-                                    # 缓存过期，重新计算
-                                    size = DiskSpaceUtils.calc_path_size_fast(child, self._plugin._max_scan_items)
-                                    with size_cache_lock:
-                                        size_cache[cache_key] = (size, time.time())
+                                    needs_calc = True
                                     diagnosis["cache_misses"] += 1
                             else:
                                 # 旧格式缓存，直接返回
                                 size = cached_value
                                 diagnosis["cache_hits"] += 1
                         else:
-                            size = DiskSpaceUtils.calc_path_size_fast(child, self._plugin._max_scan_items)
-                            with size_cache_lock:
-                                size_cache[cache_key] = (size, time.time())
+                            needs_calc = True
                             diagnosis["cache_misses"] += 1
+                    if needs_calc:
+                        size = DiskSpaceUtils.calc_path_size_fast(child, self._plugin._max_scan_items)
+                        with size_cache_lock:
+                            size_cache[cache_key] = (size, time.time())
                     
                     if size <= 0:
                         diagnosis["zero_size_skipped"] += 1
