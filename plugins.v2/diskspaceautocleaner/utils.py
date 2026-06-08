@@ -3,6 +3,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from app.log import logger
 
@@ -162,7 +163,8 @@ class DiskSpaceUtils:
         # 移除常见组名
         name = re.sub(r'\-\s*[\w\-]+$', '', name)
 
-        # 清理末尾多余分隔符和空白
+        # 清理末尾多余分隔符、残留括号和空白
+        name = re.sub(r'[\(\[（【]\s*$', '', name)
         name = re.sub(r'[\s\-_.]+$', '', name)
         name = re.sub(r'\s{2,}', ' ', name)
 
@@ -199,14 +201,15 @@ class DiskSpaceUtils:
         try:
             # 添加请求延迟，避免触发豆瓣API限制
             time.sleep(0.1)
+            encoded_title = quote(title)
             
             if api_key:
                 # 使用API Key（如果有）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={title}"
+                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
                 headers = {'Authorization': f'Bearer {api_key}'}
             else:
                 # 使用公开API（速率较低）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={title}"
+                url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
                 headers = {}
             logger.info(f"豆瓣评分查询：查询词={title}，使用{'API Key' if api_key else '公开接口'}")
             
