@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -97,6 +97,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
             logger.info(
                 f"硬盘空间自动清理已启用：dry_run={self._dry_run}, interval={self._scan_interval_minutes}min, "
                 f"min_free={self._min_free_gb}GB, target_free={self._target_free_gb}GB"
+            )
+            logger.info(
+                f"豆瓣评分配置：enable_douban_rating={self._enable_douban_rating}, "
+                f"douban_rating_min={self._douban_rating_min}, "
+                f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}"
             )
             self._schedule_next(initial=True)
         else:
@@ -401,6 +406,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
         scanner = DiskSpaceScanner(self)
         deleter = DiskSpaceDeleter(self)
         notifier = DiskSpaceNotifier(self)
+        logger.info(
+            f"本轮扫描豆瓣配置：enable_douban_rating={self._enable_douban_rating}, "
+            f"douban_rating_min={self._douban_rating_min}, "
+            f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}"
+        )
         
         for monitor in monitor_paths:
             mpath = Path(monitor)
