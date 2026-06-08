@@ -206,11 +206,24 @@ class DiskSpaceUtils:
             if api_key:
                 # 使用API Key（如果有）
                 url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
-                headers = {'Authorization': f'Bearer {api_key}'}
+                headers = {
+                    'Authorization': f'Bearer {api_key}',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/javascript, */*; q=0.01',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Referer': 'https://movie.douban.com/',
+                    'X-Requested-With': 'XMLHttpRequest',
+                }
             else:
                 # 使用公开API（速率较低）
                 url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
-                headers = {}
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/javascript, */*; q=0.01',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Referer': 'https://movie.douban.com/',
+                    'X-Requested-With': 'XMLHttpRequest',
+                }
             logger.info(f"豆瓣评分查询：查询词={title}，使用{'API Key' if api_key else '公开接口'}")
             
             import urllib.request
