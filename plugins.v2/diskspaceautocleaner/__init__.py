@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.0.8"
+    plugin_version = "3.1.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -551,6 +551,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "size_gb": round(float(x.get("size_gb") or 0), 2),
                     "age_days": x.get("age_days"),
                     "type": x.get("type"),
+                    "douban_score": x.get("douban_score"),
                 }
                 for x in selected[:50]
             ],

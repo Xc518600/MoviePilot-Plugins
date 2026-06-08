@@ -205,11 +205,17 @@ class DiskSpaceScanner:
                             )
                             if douban_score is not None:
                                 diagnosis["douban_queries"] += 1
+                                logger.info(
+                                    f"豆瓣评分命中：{title} -> {douban_score} 分，"
+                                    f"候选={child.name}，体积={size_gb:.2f}GB，天数={age_days}"
+                                )
                                 # 高分保护：超过最小评分的不进入候选
                                 if douban_score > douban_min_rating:
                                     diagnosis["protected_skipped"] += 1
-                                    logger.debug(f"跳过高分豆瓣: {title} {douban_score}分 > {douban_min_rating}分")
+                                    logger.info(f"跳过高分豆瓣：{title} {douban_score}分 > {douban_min_rating}分")
                                     continue
+                            else:
+                                logger.info(f"豆瓣评分未命中：{title}，候选={child.name}")
                     
                     # 计算优先级分数（集成豆瓣评分）
                     base_score = age_days + size_gb * 2
@@ -229,6 +235,10 @@ class DiskSpaceScanner:
                         "type": "目录" if child.is_dir() else "文件",
                         "douban_score": douban_score,
                     })
+                    logger.info(
+                        f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
+                        f"豆瓣评分={douban_score if douban_score is not None else '无'}，分值={score:.2f}"
+                    )
                 except Exception as e:
                     diagnosis["error_skipped"] += 1
                     logger.warning(f"扫描候选失败 {child}: {e}")
