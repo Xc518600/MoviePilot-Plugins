@@ -199,9 +199,12 @@ class DiskSpaceScanner:
                     if enable_douban:
                         title = DiskSpaceUtils.extract_movie_title(child)
                         if title and rating_cache is not None and rating_cache_lock is not None:
-                            douban_score = DiskSpaceUtils.get_douban_rating(
+                            douban_score = DiskSpaceUtils.get_external_rating(
                                 title, rating_cache, rating_cache_lock,
-                                getattr(self._plugin, '_douban_api_key', None)
+                                rating_source=getattr(self._plugin, '_rating_source', 'douban_public'),
+                                api_url=getattr(self._plugin, '_rating_api_url', None),
+                                api_token=getattr(self._plugin, '_rating_api_token', None),
+                                douban_api_key=getattr(self._plugin, '_douban_api_key', None),
                             )
                             if douban_score is not None:
                                 diagnosis["douban_queries"] += 1

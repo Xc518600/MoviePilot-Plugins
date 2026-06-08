@@ -253,3 +253,109 @@ class DiskSpaceUtils:
         except Exception as e:
             logger.warning(f"豆瓣评分查询失败：查询词={title}，异常={e}")
             return None
+
+    @staticmethod
+    def get_external_rating(
+        title: str,
+        rating_cache: Dict[str, Tuple[float, float]],
+        rating_cache_lock: 'threading.Lock',
+        rating_source: str = "douban_public",
+        api_url: Optional[str] = None,
+        api_token: Optional[str] = None,
+        douban_api_key: Optional[str] = None,
+    ) -> Optional[float]:
+        """统一评分查询入口：优先自定义 API，失败/未配置时回退豆瓣公开接口。"""
+        source = (rating_source or "douban_public").strip()
+        if source == "custom_api" and api_url:
+            rating = DiskSpaceUtils.get_custom_rating(
+                title=title,
+                rating_cache=rating_cache,
+                rating_cache_lock=rating_cache_lock,
+                api_url=api_url,
+                api_token=api_token,
+            )
+            if rating is not None:
+                return rating
+            logger.info(f"自定义评分 API 未命中，回退豆瓣公开接口：查询词={title}")
+
+        return DiskSpaceUtils.get_douban_rating(
+            title=title,
+            rating_cache=rating_cache,
+            rating_cache_lock=rating_cache_lock,
+            api_key=douban_api_key,
+        )
+
+    @staticmethod
+    def get_custom_rating(
+        title: str,
+        rating_cache: Dict[str, Tuple[float, float]],
+        rating_cache_lock: 'threading.Lock',
+        api_url: str,
+        api_token: Optional[str] = None,
+    ) -> Optional[float]:
+        """查询自定义评分 API。
+
+        约定：GET {api_url}?title=<标题>
+        返回 JSON 示例：
+        {"rating": 8.6}
+        或 {"score": 8.6}
+        或 {"data": {"rating": 8.6}}
+        """
+        if not title or not api_url:
+            return None
+
+        cache_key = f"custom_api::{title.lower()}"
+        with rating_cache_lock:
+            if cache_key in rating_cache:
+                rating, cache_time = rating_cache[cache_key]
+                if time.time() - cache_time < 2592000:
+                    logger.info(f"自定义评分缓存命中：查询词={title}，评分={rating}")
+                    return rating
+
+        try:
+            time.sleep(0.05)
+            encoded_title = quote(title)
+            sep = '&' if '?' in api_url else '?'
+            url = f"{api_url}{sep}title={encoded_title}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+            }
+            if api_token:
+                headers['Authorization'] = f'Bearer {api_token}'
+
+            logger.info(f"自定义评分 API 查询：查询词={title}，接口={api_url}")
+
+            import urllib.request
+            import json
+
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = response.read().decode('utf-8')
+
+            result = json.loads(data)
+            rating = None
+            if isinstance(result, dict):
+                if result.get('rating') is not None:
+                    rating = result.get('rating')
+                elif result.get('score') is not None:
+                    rating = result.get('score')
+                elif isinstance(result.get('data'), dict):
+                    rating = result['data'].get('rating') or result['data'].get('score')
+
+            if rating is None:
+                logger.info(f"自定义评分 API 无结果：查询词={title}")
+                return None
+
+            rating = float(rating)
+            with rating_cache_lock:
+                rating_cache[cache_key] = (rating, time.time())
+                if len(rating_cache) > 1000:
+                    rating_cache.clear()
+
+            logger.info(f"自定义评分 API 命中：查询词={title}，评分={rating}")
+            return rating if rating > 0 else None
+
+        except Exception as e:
+            logger.warning(f"自定义评分 API 查询失败：查询词={title}，接口={api_url}，异常={e}")
+            return None

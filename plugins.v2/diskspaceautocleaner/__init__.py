@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.1.6"
+    plugin_version = "3.2.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -51,6 +51,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _enable_douban_rating = False  # 是否启用豆瓣评分
     _douban_rating_min = 5  # 豆瓣最低评分（高于此值的不会被优先删除）
     _douban_api_key = ""  # 豆瓣API密钥（可选）
+    _rating_source = "douban_public"  # 评分来源：douban_public/custom_api
+    _rating_api_url = ""  # 自定义评分API URL
+    _rating_api_token = ""  # 自定义评分API Token
     _rating_cache: Dict[str, Tuple[float, float]] = {}  # 豆瓣评分缓存
     _rating_cache_lock = threading.Lock()
 
@@ -82,6 +85,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._enable_douban_rating = DiskSpaceUtils.to_bool(config.get("enable_douban_rating"), False)
             self._douban_rating_min = DiskSpaceUtils.to_int(config.get("douban_rating_min"), 5)
             self._douban_api_key = config.get("douban_api_key") or ""
+            self._rating_source = (config.get("rating_source") or "douban_public").strip() or "douban_public"
+            self._rating_api_url = config.get("rating_api_url") or ""
+            self._rating_api_token = config.get("rating_api_token") or ""
 
         self.stop_service()
         if self._run_once:
@@ -101,7 +107,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             logger.info(
                 f"豆瓣评分配置：enable_douban_rating={self._enable_douban_rating}, "
                 f"douban_rating_min={self._douban_rating_min}, "
-                f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}"
+                f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}, "
+                f"rating_source={self._rating_source}, "
+                f"rating_api_url={'已配置' if self._rating_api_url else '未配置'}, "
+                f"rating_api_token={'已配置' if self._rating_api_token else '未配置'}"
             )
             self._schedule_next(initial=True)
         else:
@@ -223,6 +232,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSelect", "props": {"model": "rating_source", "label": "评分数据源", "items": [{"title": "公开豆瓣接口", "value": "douban_public"}, {"title": "自定义评分 API", "value": "custom_api"}], "hint": "优先使用所选评分数据源；自定义 API 未命中时会回退公开豆瓣接口"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [{"component": "VTextField", "props": {"model": "rating_api_url", "label": "自定义评分 API URL（可选）", "placeholder": "https://example.com/api/rating", "hint": "当评分数据源选择自定义 API 时，按 GET ?title=片名 查询；返回 JSON 可包含 rating/score/data.rating"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [{"component": "VTextField", "props": {"model": "rating_api_token", "label": "自定义评分 API Token（可选）", "placeholder": "Bearer Token", "hint": "可选，用于向自定义评分 API 发送 Authorization: Bearer <token>"}}]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{"component": "VTextField", "props": {"model": "douban_api_key", "label": "豆瓣API密钥（可选）", "placeholder": "留空使用公开API", "hint": "可选配置，留空使用公开API（速率较低）"}}]
                             },
@@ -272,6 +296,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "enable_douban_rating": self._enable_douban_rating,
             "douban_rating_min": self._douban_rating_min,
             "douban_api_key": self._douban_api_key,
+            "rating_source": self._rating_source,
+            "rating_api_url": self._rating_api_url,
+            "rating_api_token": self._rating_api_token,
             "history": self._history,
             "sources": "immediate",
         }
@@ -409,7 +436,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
         logger.info(
             f"本轮扫描豆瓣配置：enable_douban_rating={self._enable_douban_rating}, "
             f"douban_rating_min={self._douban_rating_min}, "
-            f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}"
+            f"douban_api_key={'已配置' if self._douban_api_key else '未配置'}, "
+            f"rating_source={self._rating_source}, "
+            f"rating_api_url={'已配置' if self._rating_api_url else '未配置'}, "
+            f"rating_api_token={'已配置' if self._rating_api_token else '未配置'}"
         )
         
         for monitor in monitor_paths:
