@@ -150,6 +150,8 @@ class DiskSpaceUtils:
         # 移除年份（如 2023, 2023.1080p 等）
         name = re.sub(r'\b(19|20)\d{2}[^a-z]*$', '', name)
         name = re.sub(r'\b(19|20)\d{2}\.', '', name)
+        name = re.sub(r'[\(\[（【]\s*(19|20)\d{2}\s*[\)\]）】]\s*$', '', name)
+        name = re.sub(r'\s*[-_.]\s*(19|20)\d{2}\s*$', '', name)
         
         # 移除分辨率标签
         name = re.sub(r'\b(1080p|720p|4k|2160p|480p|360p)\b', '', name, flags=re.IGNORECASE)
@@ -159,7 +161,11 @@ class DiskSpaceUtils:
         
         # 移除常见组名
         name = re.sub(r'\-\s*[\w\-]+$', '', name)
-        
+
+        # 清理末尾多余分隔符和空白
+        name = re.sub(r'[\s\-_.]+$', '', name)
+        name = re.sub(r'\s{2,}', ' ', name)
+
         return name.strip() if name.strip() else None
     
     @staticmethod
@@ -186,6 +192,7 @@ class DiskSpaceUtils:
                 rating, cache_time = rating_cache[cache_key]
                 # 缓存30天
                 if time.time() - cache_time < 2592000:
+                    logger.info(f"豆瓣评分缓存命中：查询词={title}，评分={rating}")
                     return rating
         
         # 调用豆瓣API
@@ -201,6 +208,7 @@ class DiskSpaceUtils:
                 # 使用公开API（速率较低）
                 url = f"https://movie.douban.com/j/search_subjects?type=movie&tag=电影&sort=recommend&page_limit=1&page_start=0&search_value={title}"
                 headers = {}
+            logger.info(f"豆瓣评分查询：查询词={title}，使用{'API Key' if api_key else '公开接口'}")
             
             import urllib.request
             req = urllib.request.Request(url, headers=headers)
@@ -223,9 +231,9 @@ class DiskSpaceUtils:
                 
                 return rating if rating > 0 else None
             else:
-                logger.debug(f"豆瓣未找到: {title}")
+                logger.info(f"豆瓣评分查询无结果：查询词={title}")
                 return None
-        
+
         except Exception as e:
-            logger.warning(f"豆瓣查询失败 {title}: {e}")
+            logger.warning(f"豆瓣评分查询失败：查询词={title}，异常={e}")
             return None
