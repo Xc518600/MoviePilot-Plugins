@@ -3,7 +3,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.log import logger
 
@@ -21,9 +21,7 @@ class DiskSpaceScanner:
                         size_cache: Dict[str, int],
                         size_cache_lock: threading.Lock,
                         monitor_path: Optional[Path] = None,
-                        scan_paths: Optional[List[str]] = None,
-                        rating_cache: Optional[Dict[str, Tuple[float, float]]] = None,
-                        rating_cache_lock: Optional[threading.Lock] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                        scan_paths: Optional[List[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """构建清理候选列表（使用多线程并行扫描）。"""
         media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
         protect_dirs = [Path(p).as_posix().rstrip("/") for p in DiskSpaceUtils.lines(self._plugin._protect_dirs)]
@@ -45,7 +43,6 @@ class DiskSpaceScanner:
             "scan_time_seconds": 0,
             "cache_hits": 0,
             "cache_misses": 0,
-            "douban_queries": 0,
         }
         now = time.time()
         recent_seconds = max(0, int(self._plugin._recent_days_protect or 0)) * 86400
@@ -62,10 +59,9 @@ class DiskSpaceScanner:
         with ThreadPoolExecutor(max_workers=self._plugin._scan_workers) as executor:
             # 提交所有扫描任务
             future_to_root = {
-                executor.submit(self._scan_media_root, root, depth, now, recent_seconds, 
-                               max_items, protect_dirs, protect_keywords, 
-                               size_cache, size_cache_lock,
-                               rating_cache, rating_cache_lock): root 
+                executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
+                               max_items, protect_dirs, protect_keywords,
+                               size_cache, size_cache_lock): root
                 for root in media_paths
             }
             
@@ -108,9 +104,7 @@ class DiskSpaceScanner:
     
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
-                         size_cache: Dict[str, int], size_cache_lock: threading.Lock,
-                         rating_cache: Optional[Dict[str, Tuple[float, float]]] = None,
-                         rating_cache_lock: Optional[threading.Lock] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         size_cache: Dict[str, int], size_cache_lock: threading.Lock) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
         candidates: List[Dict[str, Any]] = []
@@ -124,7 +118,6 @@ class DiskSpaceScanner:
             "error_skipped": 0,
             "cache_hits": 0,
             "cache_misses": 0,
-            "douban_queries": 0,
         }
         
         if not root.exists() or not root.is_dir():
@@ -191,41 +184,8 @@ class DiskSpaceScanner:
                     age_days = max(0, int((now - stat.st_mtime) / 86400))
                     size_gb = size / 1024 ** 3
                     
-                    # 获取豆瓣评分（如果启用）
-                    enable_douban = DiskSpaceUtils.to_bool(self._plugin._enable_douban_rating, False)
-                    douban_min_rating = DiskSpaceUtils.to_int(self._plugin._douban_rating_min, 5)
-                    douban_score = None
-                    
-                    if enable_douban:
-                        title = DiskSpaceUtils.extract_movie_title(child)
-                        if title and rating_cache is not None and rating_cache_lock is not None:
-                            douban_score = DiskSpaceUtils.get_external_rating(
-                                title, rating_cache, rating_cache_lock,
-                                rating_source=getattr(self._plugin, '_rating_source', 'douban_public'),
-                                api_url=getattr(self._plugin, '_rating_api_url', None),
-                                api_token=getattr(self._plugin, '_rating_api_token', None),
-                                douban_api_key=getattr(self._plugin, '_douban_api_key', None),
-                            )
-                            if douban_score is not None:
-                                diagnosis["douban_queries"] += 1
-                                logger.info(
-                                    f"豆瓣评分命中：{title} -> {douban_score} 分，"
-                                    f"候选={child.name}，体积={size_gb:.2f}GB，天数={age_days}"
-                                )
-                                # 高分保护：超过最小评分的不进入候选
-                                if douban_score > douban_min_rating:
-                                    diagnosis["protected_skipped"] += 1
-                                    logger.info(f"跳过高分豆瓣：{title} {douban_score}分 > {douban_min_rating}分")
-                                    continue
-                            else:
-                                logger.info(f"豆瓣评分未命中：{title}，候选={child.name}")
-                    
-                    # 计算优先级分数（集成豆瓣评分）
                     base_score = age_days + size_gb * 2
-                    if douban_score is not None and douban_score > 0:
-                        score = base_score + (10 - douban_score) * 3
-                    else:
-                        score = base_score
+                    score = base_score
                     
                     candidates.append({
                         "path": child.as_posix(),
@@ -236,11 +196,9 @@ class DiskSpaceScanner:
                         "mtime": stat.st_mtime,
                         "score": score,
                         "type": "目录" if child.is_dir() else "文件",
-                        "douban_score": douban_score,
                     })
                     logger.info(
-                        f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
-                        f"豆瓣评分={douban_score if douban_score is not None else '无'}，分值={score:.2f}"
+                        f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，分值={score:.2f}"
                     )
                 except Exception as e:
                     diagnosis["error_skipped"] += 1

@@ -1,9 +1,7 @@
 import os
 import re
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional
 
 from app.log import logger
 
@@ -63,7 +61,6 @@ class DiskSpaceUtils:
                 for entry in it:
                     if entry.is_dir():
                         name = entry.name.lower()
-                        # 识别 Season/S/S01/Season 01 等模式
                         if (name.startswith("season") or 
                             (name.startswith("s") and len(name) > 1 and name[1:].isdigit()) or
                             "season" in name):
@@ -77,13 +74,11 @@ class DiskSpaceUtils:
         """检测根目录类型（电视剧/电影/其他）。"""
         path_str = path.as_posix().lower()
         
-        # 电视剧关键词
         tv_keywords = ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]
         for keyword in tv_keywords:
             if keyword in path_str:
                 return "电视剧"
         
-        # 电影关键词
         movie_keywords = ["/电影/", "/movie/", "/movies/"]
         for keyword in movie_keywords:
             if keyword in path_str:
@@ -97,12 +92,10 @@ class DiskSpaceUtils:
         path_str = path.as_posix()
         path_lower = path_str.lower()
         
-        # 检查保护目录
         for protect_dir in protect_dirs:
             if protect_dir and path_str.startswith(protect_dir.rstrip("/")):
                 return False
         
-        # 检查保护关键词
         for keyword in protect_keywords:
             if keyword and keyword.lower() in path_lower:
                 return False
@@ -139,223 +132,20 @@ class DiskSpaceUtils:
             pass
         
         return total
-    
+
     @staticmethod
     def extract_movie_title(path: Path) -> Optional[str]:
         """从路径中提取电影/电视剧标题。"""
         name = path.name
-        
-        # 移除常见后缀
         name = re.sub(r'\.(mp4|mkv|avi|rmvb|flv|wmv|ts|mov|m4v)$', '', name, flags=re.IGNORECASE)
-        
-        # 移除年份（如 2023, 2023.1080p 等）
         name = re.sub(r'\b(19|20)\d{2}[^a-z]*$', '', name)
         name = re.sub(r'\b(19|20)\d{2}\.', '', name)
         name = re.sub(r'[\(\[（【]\s*(19|20)\d{2}\s*[\)\]）】]\s*$', '', name)
         name = re.sub(r'\s*[-_.]\s*(19|20)\d{2}\s*$', '', name)
-        
-        # 移除分辨率标签
         name = re.sub(r'\b(1080p|720p|4k|2160p|480p|360p)\b', '', name, flags=re.IGNORECASE)
-        
-        # 移除来源标签
         name = re.sub(r'\b(web-dl|bluray|bdrip|hdtv|hdcam|ts|cam)\b', '', name, flags=re.IGNORECASE)
-        
-        # 移除常见组名
         name = re.sub(r'\-\s*[\w\-]+$', '', name)
-
-        # 清理末尾多余分隔符、残留括号和空白
         name = re.sub(r'[\(\[（【]\s*$', '', name)
         name = re.sub(r'[\s\-_.]+$', '', name)
         name = re.sub(r'\s{2,}', ' ', name)
-
         return name.strip() if name.strip() else None
-    
-    @staticmethod
-    def get_douban_rating(title: str, rating_cache: Dict[str, Tuple[float, float]],
-                         rating_cache_lock: 'threading.Lock', api_key: Optional[str] = None) -> Optional[float]:
-        """获取豆瓣评分（带缓存）。
-        
-        Args:
-            title: 电影/电视剧标题
-            rating_cache: 评分缓存字典 {title: (rating, cache_time)}
-            rating_cache_lock: 缓存锁
-            api_key: 豆瓣API密钥（可选）
-        
-        Returns:
-            豆瓣评分（0-10），None表示查询失败
-        """
-        if not title:
-            return None
-        
-        # 检查缓存
-        cache_key = title.lower()
-        with rating_cache_lock:
-            if cache_key in rating_cache:
-                rating, cache_time = rating_cache[cache_key]
-                # 缓存30天
-                if time.time() - cache_time < 2592000:
-                    logger.info(f"豆瓣评分缓存命中：查询词={title}，评分={rating}")
-                    return rating
-        
-        # 调用豆瓣API
-        try:
-            # 添加请求延迟，避免触发豆瓣API限制
-            time.sleep(0.1)
-            encoded_title = quote(title)
-            
-            if api_key:
-                # 使用API Key（如果有）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
-                headers = {
-                    'Authorization': f'Bearer {api_key}',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-                    'Accept': 'application/json, text/javascript, */*; q=0.01',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Referer': 'https://movie.douban.com/',
-                    'X-Requested-With': 'XMLHttpRequest',
-                }
-            else:
-                # 使用公开API（速率较低）
-                url = f"https://movie.douban.com/j/search_subjects?type=movie&sort=recommend&page_limit=1&page_start=0&search_value={encoded_title}"
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-                    'Accept': 'application/json, text/javascript, */*; q=0.01',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Referer': 'https://movie.douban.com/',
-                    'X-Requested-With': 'XMLHttpRequest',
-                }
-            logger.info(f"豆瓣评分查询：查询词={title}，使用{'API Key' if api_key else '公开接口'}")
-            
-            import urllib.request
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = response.read().decode('utf-8')
-            
-            import json
-            result = json.loads(data)
-            
-            if result.get('subjects') and len(result['subjects']) > 0:
-                # 获取第一个结果的评分
-                rating = float(result['subjects'][0].get('rate', 0))
-                
-                # 保存到缓存
-                with rating_cache_lock:
-                    rating_cache[cache_key] = (rating, time.time())
-                    # 缓存超过1000个时清理旧的
-                    if len(rating_cache) > 1000:
-                        rating_cache.clear()
-                
-                return rating if rating > 0 else None
-            else:
-                logger.info(f"豆瓣评分查询无结果：查询词={title}")
-                return None
-
-        except Exception as e:
-            logger.warning(f"豆瓣评分查询失败：查询词={title}，异常={e}")
-            return None
-
-    @staticmethod
-    def get_external_rating(
-        title: str,
-        rating_cache: Dict[str, Tuple[float, float]],
-        rating_cache_lock: 'threading.Lock',
-        rating_source: str = "douban_public",
-        api_url: Optional[str] = None,
-        api_token: Optional[str] = None,
-        douban_api_key: Optional[str] = None,
-    ) -> Optional[float]:
-        """统一评分查询入口：优先自定义 API，失败/未配置时回退豆瓣公开接口。"""
-        source = (rating_source or "douban_public").strip()
-        if source == "custom_api" and api_url:
-            rating = DiskSpaceUtils.get_custom_rating(
-                title=title,
-                rating_cache=rating_cache,
-                rating_cache_lock=rating_cache_lock,
-                api_url=api_url,
-                api_token=api_token,
-            )
-            if rating is not None:
-                return rating
-            logger.info(f"自定义评分 API 未命中，回退豆瓣公开接口：查询词={title}")
-
-        return DiskSpaceUtils.get_douban_rating(
-            title=title,
-            rating_cache=rating_cache,
-            rating_cache_lock=rating_cache_lock,
-            api_key=douban_api_key,
-        )
-
-    @staticmethod
-    def get_custom_rating(
-        title: str,
-        rating_cache: Dict[str, Tuple[float, float]],
-        rating_cache_lock: 'threading.Lock',
-        api_url: str,
-        api_token: Optional[str] = None,
-    ) -> Optional[float]:
-        """查询自定义评分 API。
-
-        约定：GET {api_url}?title=<标题>
-        返回 JSON 示例：
-        {"rating": 8.6}
-        或 {"score": 8.6}
-        或 {"data": {"rating": 8.6}}
-        """
-        if not title or not api_url:
-            return None
-
-        cache_key = f"custom_api::{title.lower()}"
-        with rating_cache_lock:
-            if cache_key in rating_cache:
-                rating, cache_time = rating_cache[cache_key]
-                if time.time() - cache_time < 2592000:
-                    logger.info(f"自定义评分缓存命中：查询词={title}，评分={rating}")
-                    return rating
-
-        try:
-            time.sleep(0.05)
-            encoded_title = quote(title)
-            sep = '&' if '?' in api_url else '?'
-            url = f"{api_url}{sep}title={encoded_title}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/plain, */*',
-            }
-            if api_token:
-                headers['Authorization'] = f'Bearer {api_token}'
-
-            logger.info(f"自定义评分 API 查询：查询词={title}，接口={api_url}")
-
-            import urllib.request
-            import json
-
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = response.read().decode('utf-8')
-
-            result = json.loads(data)
-            rating = None
-            if isinstance(result, dict):
-                if result.get('rating') is not None:
-                    rating = result.get('rating')
-                elif result.get('score') is not None:
-                    rating = result.get('score')
-                elif isinstance(result.get('data'), dict):
-                    rating = result['data'].get('rating') or result['data'].get('score')
-
-            if rating is None:
-                logger.info(f"自定义评分 API 无结果：查询词={title}")
-                return None
-
-            rating = float(rating)
-            with rating_cache_lock:
-                rating_cache[cache_key] = (rating, time.time())
-                if len(rating_cache) > 1000:
-                    rating_cache.clear()
-
-            logger.info(f"自定义评分 API 命中：查询词={title}，评分={rating}")
-            return rating if rating > 0 else None
-
-        except Exception as e:
-            logger.warning(f"自定义评分 API 查询失败：查询词={title}，接口={api_url}，异常={e}")
-            return None
