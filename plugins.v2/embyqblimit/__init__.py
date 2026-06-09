@@ -23,7 +23,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4"
+    plugin_version = "2.4.2"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -305,12 +305,8 @@ class EmbyQBLimit(_PluginBase):
     def _restore_limit(self):
         """恢复原速"""
         try:
-            if self._restore_download_limit > 0 or self._restore_upload_limit > 0:
-                dl = self._restore_download_limit
-                ul = self._restore_upload_limit
-            else:
-                dl = self._original_download_limit
-                ul = self._original_upload_limit
+            dl = self._restore_download_limit if self._restore_download_limit is not None else self._original_download_limit
+            ul = self._restore_upload_limit if self._restore_upload_limit is not None else self._original_upload_limit
 
             self._set_downloader_limits(download_limit=dl, upload_limit=ul)
             logger.info(f"已恢复下载器限速: 下载={dl}KB/s, 上传={ul}KB/s")
@@ -518,12 +514,12 @@ class EmbyQBLimit(_PluginBase):
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "restore_download_limit", "label": "固定恢复下载限速", "type": "number", "suffix": "KB/s", "hint": "0 使用播放前原始限速", "persistent-hint": True}}]
+                                                "content": [{"component": "VTextField", "props": {"model": "restore_download_limit", "label": "固定恢复下载限速", "type": "number", "suffix": "KB/s", "hint": "0 表示不限速", "persistent-hint": True}}]
                                             },
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "restore_upload_limit", "label": "固定恢复上传限速", "type": "number", "suffix": "KB/s", "hint": "0 使用播放前原始限速", "persistent-hint": True}}]
+                                                "content": [{"component": "VTextField", "props": {"model": "restore_upload_limit", "label": "固定恢复上传限速", "type": "number", "suffix": "KB/s", "hint": "0 表示不限速", "persistent-hint": True}}]
                                             }
                                         ]
                                     }
