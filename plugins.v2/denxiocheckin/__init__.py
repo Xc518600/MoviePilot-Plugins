@@ -3,6 +3,7 @@
 
 import json
 import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,7 +20,7 @@ from app.schemas import NotificationType
 class DenxioCheckin(_PluginBase):
     plugin_name = "登仙签到"
     plugin_desc = "登录登仙后执行赞助签到。"
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.5"
     plugin_author = "老公"
     plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行登仙赞助签到流程。"
     plugin_icon = "check_circle.png"
@@ -38,6 +39,8 @@ class DenxioCheckin(_PluginBase):
     _headers_json = "{}"
     _timeout = 15
     _timezone = "Asia/Shanghai"
+    _claim_retry_times = 5
+    _claim_retry_interval = 2
 
     _last_run_at = ""
     _last_success = False
@@ -62,6 +65,8 @@ class DenxioCheckin(_PluginBase):
             self._headers_json = config.get("headers_json") or "{}"
             self._timeout = max(int(config.get("timeout") or 15), 3)
             self._timezone = (config.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+            self._claim_retry_times = max(int(config.get("claim_retry_times") or 5), 1)
+            self._claim_retry_interval = max(int(config.get("claim_retry_interval") or 2), 1)
             self._last_run_at = config.get("last_run_at") or ""
             self._last_success = bool(config.get("last_success", False))
             self._last_message = config.get("last_message") or ""
@@ -171,6 +176,24 @@ class DenxioCheckin(_PluginBase):
         data = self._unwrap_api(resp)
         return data if isinstance(data, dict) else {}
 
+    def _claim_normal_with_retry(self, session: requests.Session, token: str) -> Dict[str, Any]:
+        last_error = None
+        for attempt in range(1, self._claim_retry_times + 1):
+            try:
+                return self._claim_normal(session, token)
+            except Exception as e:
+                message = str(e)
+                last_error = e
+                if "TBE_SPONSOR_CHECKIN_SESSION_PENDING" not in message and "check-in session is not ready" not in message:
+                    raise
+                if attempt >= self._claim_retry_times:
+                    break
+                logger.warning(
+                    f"登仙签到 claim 第 {attempt} 次仍未就绪，{self._claim_retry_interval}s 后重试：{message}"
+                )
+                time.sleep(self._claim_retry_interval)
+        raise last_error or RuntimeError("claim 重试失败")
+
     def _unwrap_api(self, resp: requests.Response, allow_409: bool = False):
         text = resp.text or ""
         try:
@@ -219,7 +242,7 @@ class DenxioCheckin(_PluginBase):
                 token = (begin_result or {}).get("token") if isinstance(begin_result, dict) else None
                 if not token:
                     raise RuntimeError(f"开始签到成功，但没有拿到 token：{begin_result}")
-                claim_result = self._claim_normal(session, token)
+                claim_result = self._claim_normal_with_retry(session, token)
                 amount = claim_result.get("amount") if isinstance(claim_result, dict) else None
                 sponsor_name = claim_result.get("sponsor_name") if isinstance(claim_result, dict) else None
                 me = self._get_me(session)
@@ -275,6 +298,8 @@ class DenxioCheckin(_PluginBase):
             "email": self._email,
             "password": self._password,
             "timezone": self._timezone,
+            "claim_retry_times": self._claim_retry_times,
+            "claim_retry_interval": self._claim_retry_interval,
             "cookie": self._cookie,
             "headers_json": self._headers_json,
             "timeout": self._timeout,
@@ -303,6 +328,8 @@ class DenxioCheckin(_PluginBase):
                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式", "placeholder": "5 0 * * *", "hint": "默认每天 00:05 执行一次"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "timezone", "label": "时区", "placeholder": "Asia/Shanghai", "hint": "默认按中国时区签到"}}]},
                             {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "timeout", "label": "超时秒数", "type": "number", "placeholder": "15", "hint": "网络一般正常时 15 秒足够"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "claim_retry_times", "label": "Claim 重试次数", "type": "number", "placeholder": "5", "hint": "站点返回 session pending 时自动重试 claim"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "claim_retry_interval", "label": "Claim 重试间隔秒", "type": "number", "placeholder": "2", "hint": "默认每 2 秒重试一次"}}]},
                             {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "cookie", "label": "Cookie（通常留空）", "rows": 2, "placeholder": "name=value; name2=value2", "hint": "当前真实流程只靠登录 token 就能签到，除非站点后续风控变化，否则不用填"}}]},
                             {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "headers_json", "label": "附加请求头(JSON，可留空)", "rows": 4, "placeholder": '{\n  "X-Test": "value"\n}', "hint": "保留给以后兼容风控或特殊请求头，当前通常不需要填写"}}]},
                             {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VAlert", "props": {"type": self._alert_type(), "variant": "tonal", "text": self._status_text()}}]},
@@ -319,6 +346,8 @@ class DenxioCheckin(_PluginBase):
             "email": self._email,
             "password": self._password,
             "timezone": self._timezone,
+            "claim_retry_times": self._claim_retry_times,
+            "claim_retry_interval": self._claim_retry_interval,
             "cookie": self._cookie,
             "headers_json": self._headers_json,
             "timeout": self._timeout,
