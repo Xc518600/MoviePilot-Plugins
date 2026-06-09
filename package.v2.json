@@ -85,5 +85,22 @@
       "v1.2": "新增配置页\"保存后立即运行一次\"开关：打开并保存配置后马上执行一次空间检查，执行后自动复位；兼容页面按钮不显示的 MoviePilot 版本。默认仍只报告，不删除任何文件。",
       "v2.0": "修复满盘但候选为空的问题：新增候选扫描深度，默认2层，可识别 /link5/电影/电影A 这类结构；新增实际扫描路径和诊断统计，显示缺失路径、保护跳过、最近保护跳过、扫描上限等原因。默认仍只报告，不删除任何文件。"
     }
+  },
+  "DenxioCheckin": {
+    "name": "Denxio签到",
+    "description": "登录 api.denxio.top 后自动执行赞助签到，支持手动执行、定时执行、结果通知和已签到状态兼容。",
+    "labels": "签到,自动化,MoviePilot",
+    "version": "1.2",
+    "icon": "check_circle.png",
+    "author": "老公",
+    "level": 1,
+    "v2": true,
+    "release": false,
+    "dependencies": ["requests>=2.28.0", "APScheduler>=3.10.0", "pytz>=2023.3"],
+    "history": {
+      "v1.2": "成品化整理默认配置：新增时区、优化默认超时与配置提示，表单说明更清晰，更适合直接接入聚合仓库。",
+      "v1.1": "按真实 Denxio 接口流程重写：auth/login -> tbe-sponsor-checkin/status -> normal/begin -> normal/claim，并兼容当天已签到场景。",
+      "v1.0": "初始版本：提供 MoviePilot 插件骨架，支持手动/定时执行、账号密码配置、请求头/Cookie 配置与结果展示。"
+    }
   }
 }
