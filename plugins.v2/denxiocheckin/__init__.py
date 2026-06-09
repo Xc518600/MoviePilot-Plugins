@@ -19,7 +19,7 @@ from app.schemas import NotificationType
 class DenxioCheckin(_PluginBase):
     plugin_name = "Denxio签到"
     plugin_desc = "登录 Denxio 后执行赞助签到。"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_author = "老公"
     plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行 tbe-sponsor-checkin 签到流程。"
     plugin_icon = "check_circle.png"
@@ -154,6 +154,12 @@ class DenxioCheckin(_PluginBase):
         data = self._unwrap_api(resp)
         return data if isinstance(data, dict) else {}
 
+    def _get_me(self, session: requests.Session) -> Dict[str, Any]:
+        url = f"{self._base_url}/api/v1/auth/me"
+        resp = session.get(url, timeout=self._timeout)
+        data = self._unwrap_api(resp)
+        return data if isinstance(data, dict) else {}
+
     def _begin_normal(self, session: requests.Session) -> Dict[str, Any]:
         url = f"{self._base_url}/api/v1/tbe-sponsor-checkin/normal/begin"
         resp = session.post(url, json={"timezone": self._timezone}, timeout=self._timeout)
@@ -193,7 +199,12 @@ class DenxioCheckin(_PluginBase):
                     record = ((before_status.get("recent_records") or [{}])[0]) if isinstance(before_status.get("recent_records"), list) else {}
                     amount = record.get("amount")
                     sponsor_name = record.get("sponsor_name") or "-"
-                    message = f"今天已经签到过了，赞助商：{sponsor_name}，奖励：{amount if amount is not None else '-'}"
+                    me = self._get_me(session)
+                    balance = me.get("balance")
+                    message = (
+                        f"今天已经签到过了，赞助商：{sponsor_name}，"
+                        f"本次奖励：{self._fmt_num(amount)}，当前余额：{self._fmt_num(balance)}"
+                    )
                     self._save_result(run_at, True, 200, message, json.dumps(before_status, ensure_ascii=False)[:2000])
                     self._notify_result(manual, True, 200, message, run_at)
                     return
@@ -211,7 +222,12 @@ class DenxioCheckin(_PluginBase):
                 claim_result = self._claim_normal(session, token)
                 amount = claim_result.get("amount") if isinstance(claim_result, dict) else None
                 sponsor_name = claim_result.get("sponsor_name") if isinstance(claim_result, dict) else None
-                message = f"签到成功，赞助商：{sponsor_name or '-'}，奖励：{amount if amount is not None else '-'}"
+                me = self._get_me(session)
+                balance = me.get("balance")
+                message = (
+                    f"签到成功，赞助商：{sponsor_name or '-'}，"
+                    f"本次奖励：{self._fmt_num(amount)}，当前余额：{self._fmt_num(balance)}"
+                )
                 self._save_result(run_at, True, 200, message, json.dumps(claim_result, ensure_ascii=False)[:2000])
                 self._notify_result(manual, True, 200, message, run_at)
             except Exception as e:
@@ -237,6 +253,17 @@ class DenxioCheckin(_PluginBase):
             mtype=NotificationType.Plugin,
             text=f"时间：{run_at}\n方式：{'手动' if manual else '定时'}\n结果：{'成功' if success else '失败'}\n状态码：{status_code or '-'}\n说明：{message}",
         )
+
+    @staticmethod
+    def _fmt_num(value: Any) -> str:
+        try:
+            if value is None:
+                return "-"
+            num = float(value)
+            text = f"{num:.8f}".rstrip("0").rstrip(".")
+            return text or "0"
+        except Exception:
+            return str(value) if value is not None else "-"
 
     def __save_state(self):
         self.update_config({
