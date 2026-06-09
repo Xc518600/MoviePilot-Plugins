@@ -17,11 +17,11 @@ from app.schemas import NotificationType
 
 
 class DenxioCheckin(_PluginBase):
-    plugin_name = "Denxio签到"
-    plugin_desc = "登录 Denxio 后执行赞助签到。"
+    plugin_name = "登仙签到"
+    plugin_desc = "登录登仙后执行赞助签到。"
     plugin_version = "1.2.3"
     plugin_author = "老公"
-    plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行 tbe-sponsor-checkin 签到流程。"
+    plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行登仙赞助签到流程。"
     plugin_icon = "check_circle.png"
     plugin_config_prefix = "denxiocheckin_"
     plugin_level = 1
@@ -341,7 +341,7 @@ class DenxioCheckin(_PluginBase):
                                         "props": {
                                             "type": self._alert_type(),
                                             "variant": "tonal",
-                                            "title": "Denxio签到状态",
+                                            "title": "登仙签到状态",
                                             "text": self._status_text(),
                                         },
                                     }
@@ -355,7 +355,7 @@ class DenxioCheckin(_PluginBase):
 
     def _status_text(self) -> str:
         if not self._last_run_at:
-            return "最近未执行签到。已适配真实站点流程：/api/v1/auth/login -> /api/v1/tbe-sponsor-checkin/status -> /normal/begin -> /normal/claim。"
+            return "最近未执行签到。已适配登仙真实站点流程：/api/v1/auth/login -> /api/v1/tbe-sponsor-checkin/status -> /normal/begin -> /normal/claim。"
         return (
             f"最近执行：{self._last_run_at} | "
             f"结果：{'成功' if self._last_success else '失败'} | "
