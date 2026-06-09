@@ -19,7 +19,7 @@ from app.schemas import NotificationType
 class DenxioCheckin(_PluginBase):
     plugin_name = "Denxio签到"
     plugin_desc = "登录 Denxio 后执行赞助签到。"
-    plugin_version = "1.2"
+    plugin_version = "1.2.2"
     plugin_author = "老公"
     plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行 tbe-sponsor-checkin 签到流程。"
     plugin_icon = "check_circle.png"
@@ -296,6 +296,35 @@ class DenxioCheckin(_PluginBase):
             "headers_json": self._headers_json,
             "timeout": self._timeout,
         }
+
+    def get_page(self) -> List[dict]:
+        return [
+            {
+                "component": "VPage",
+                "content": [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": self._alert_type(),
+                                            "variant": "tonal",
+                                            "title": "Denxio签到状态",
+                                            "text": self._status_text(),
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
 
     def _status_text(self) -> str:
         if not self._last_run_at:
