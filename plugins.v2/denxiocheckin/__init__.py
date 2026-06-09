@@ -20,7 +20,7 @@ from app.schemas import NotificationType
 class DenxioCheckin(_PluginBase):
     plugin_name = "登仙签到"
     plugin_desc = "登录登仙后执行赞助签到。"
-    plugin_version = "1.2.5"
+    plugin_version = "1.2.6"
     plugin_author = "老公"
     plugin_description = "适配 api.denxio.top：使用邮箱/密码登录，然后执行登仙赞助签到流程。"
     plugin_icon = "check_circle.png"
@@ -217,10 +217,12 @@ class DenxioCheckin(_PluginBase):
                 session = requests.Session()
                 session.headers.update(self._build_session_headers())
                 self._login(session)
+                before_me = self._get_me(session)
+                before_balance = self._safe_float(before_me.get("balance"))
                 before_status = self._get_status(session)
                 if before_status.get("normal_done"):
                     record = ((before_status.get("recent_records") or [{}])[0]) if isinstance(before_status.get("recent_records"), list) else {}
-                    amount = record.get("amount")
+                    amount = self._resolve_reward_amount(record.get("amount"), None, None)
                     sponsor_name = record.get("sponsor_name") or "-"
                     me = self._get_me(session)
                     balance = me.get("balance")
@@ -243,10 +245,15 @@ class DenxioCheckin(_PluginBase):
                 if not token:
                     raise RuntimeError(f"开始签到成功，但没有拿到 token：{begin_result}")
                 claim_result = self._claim_normal_with_retry(session, token)
-                amount = claim_result.get("amount") if isinstance(claim_result, dict) else None
+                after_me = self._get_me(session)
+                after_balance = self._safe_float(after_me.get("balance"))
+                amount = self._resolve_reward_amount(
+                    claim_result.get("amount") if isinstance(claim_result, dict) else None,
+                    before_balance,
+                    after_balance,
+                )
                 sponsor_name = claim_result.get("sponsor_name") if isinstance(claim_result, dict) else None
-                me = self._get_me(session)
-                balance = me.get("balance")
+                balance = after_me.get("balance")
                 message = (
                     f"签到成功，赞助商：{sponsor_name or '-'}，"
                     f"本次奖励：{self._fmt_num(amount)}，当前余额：{self._fmt_num(balance)}"
@@ -287,6 +294,30 @@ class DenxioCheckin(_PluginBase):
             return text or "0"
         except Exception:
             return str(value) if value is not None else "-"
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _resolve_reward_amount(
+        self,
+        direct_amount: Any,
+        before_balance: Optional[float],
+        after_balance: Optional[float],
+    ) -> Optional[float]:
+        direct = self._safe_float(direct_amount)
+        if direct is not None and direct > 0:
+            return direct
+        if before_balance is not None and after_balance is not None:
+            delta = round(after_balance - before_balance, 8)
+            if delta > 0:
+                return delta
+        return direct
 
     def __save_state(self):
         self.update_config({
