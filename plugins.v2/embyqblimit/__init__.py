@@ -23,7 +23,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4.2"
+    plugin_version = "2.4.3"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -41,6 +41,7 @@ class EmbyQBLimit(_PluginBase):
     _restore_download_limit = 0
     _restore_upload_limit = 0
     _check_interval = 10
+    _stop_cooldown = 15
     _notify = True
     _notify_type = "Plugin"
     _whitelist_users = ""
@@ -52,6 +53,7 @@ class EmbyQBLimit(_PluginBase):
     _original_upload_limit = 0
     _last_playback_check = 0
     _last_playing_title = ""
+    _last_stop_time = 0
     _monitor_thread = None
     _stop_event = threading.Event()
     _message_helper = None
@@ -70,6 +72,7 @@ class EmbyQBLimit(_PluginBase):
             self._restore_download_limit = int(config.get("restore_download_limit") or 0)
             self._restore_upload_limit = int(config.get("restore_upload_limit") or 0)
             self._check_interval = max(int(config.get("check_interval") or 10), 5)
+            self._stop_cooldown = max(int(config.get("stop_cooldown") or 15), 0)
             self._notify = config.get("notify", True)
             self._notify_type = config.get("notify_type", "Plugin")
             self._whitelist_users = config.get("whitelist_users", "")
@@ -169,7 +172,13 @@ class EmbyQBLimit(_PluginBase):
     def _refresh_play_state(self, source: str = "轮询"):
         """根据真实播放会话切换限速状态。"""
         is_playing = self._check_media_server_playing()
+        now = time.time()
         if is_playing and not self._is_playing:
+            if self._last_stop_time and now - self._last_stop_time < self._stop_cooldown:
+                logger.info(
+                    f"{source}检测到播放会话，但距离上次停止仅 {now - self._last_stop_time:.1f}s，仍在冷却期 {self._stop_cooldown}s 内，忽略本次重新限速"
+                )
+                return
             logger.info(f"{source}检测到媒体服务器 {self._media_server} 开始播放，开始限速下载器 {self._downloader}")
             self._send_notification("开始播放，正在限速...")
             self._apply_limit()
@@ -180,6 +189,7 @@ class EmbyQBLimit(_PluginBase):
                 self._restore_limit()
             self._send_notification("停止播放，已恢复原速")
             self._is_playing = False
+            self._last_stop_time = now
             self._last_playing_title = ""
 
     def _get_downloader_service(self):
@@ -546,8 +556,18 @@ class EmbyQBLimit(_PluginBase):
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "whitelist_users", "label": "白名单用户", "placeholder": "多个用英文逗号分隔"}}]
+                                                "content": [{"component": "VTextField", "props": {"model": "stop_cooldown", "label": "停止后冷却时间", "type": "number", "suffix": "秒", "hint": "停止播放后短时间忽略残留播放会话，避免刚恢复又被重新限速", "persistent-hint": True}}]
                                             },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [{"component": "VTextField", "props": {"model": "whitelist_users", "label": "白名单用户", "placeholder": "多个用英文逗号分隔"}}]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "component": "VRow",
+                                        "content": [
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
@@ -570,6 +590,7 @@ class EmbyQBLimit(_PluginBase):
             "qb_download_limit": 1024,
             "qb_upload_limit": 1024,
             "check_interval": 10,
+            "stop_cooldown": 15,
             "whitelist_users": "",
             "whitelist_devices": "",
             "restore_on_stop": True,
