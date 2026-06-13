@@ -23,7 +23,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4.3"
+    plugin_version = "2.4"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -41,7 +41,6 @@ class EmbyQBLimit(_PluginBase):
     _restore_download_limit = 0
     _restore_upload_limit = 0
     _check_interval = 10
-    _stop_cooldown = 15
     _notify = True
     _notify_type = "Plugin"
     _whitelist_users = ""
@@ -53,7 +52,6 @@ class EmbyQBLimit(_PluginBase):
     _original_upload_limit = 0
     _last_playback_check = 0
     _last_playing_title = ""
-    _last_stop_time = 0
     _monitor_thread = None
     _stop_event = threading.Event()
     _message_helper = None
@@ -72,7 +70,6 @@ class EmbyQBLimit(_PluginBase):
             self._restore_download_limit = int(config.get("restore_download_limit") or 0)
             self._restore_upload_limit = int(config.get("restore_upload_limit") or 0)
             self._check_interval = max(int(config.get("check_interval") or 10), 5)
-            self._stop_cooldown = max(int(config.get("stop_cooldown") or 15), 0)
             self._notify = config.get("notify", True)
             self._notify_type = config.get("notify_type", "Plugin")
             self._whitelist_users = config.get("whitelist_users", "")
@@ -172,24 +169,31 @@ class EmbyQBLimit(_PluginBase):
     def _refresh_play_state(self, source: str = "轮询"):
         """根据真实播放会话切换限速状态。"""
         is_playing = self._check_media_server_playing()
-        now = time.time()
         if is_playing and not self._is_playing:
-            if self._last_stop_time and now - self._last_stop_time < self._stop_cooldown:
-                logger.info(
-                    f"{source}检测到播放会话，但距离上次停止仅 {now - self._last_stop_time:.1f}s，仍在冷却期 {self._stop_cooldown}s 内，忽略本次重新限速"
-                )
-                return
             logger.info(f"{source}检测到媒体服务器 {self._media_server} 开始播放，开始限速下载器 {self._downloader}")
-            self._send_notification("开始播放，正在限速...")
-            self._apply_limit()
+            media_info = f"正在观看：{self._last_playing_title}" if self._last_playing_title else ""
+            limit_info = f"限速：下载 {self._qb_download_limit}KB/s，上传 {self._qb_upload_limit}KB/s"
+            self._send_notification("🎬 检测到开始播放", f"{media_info}\n{limit_info}")
+            self._apply_limit(notify=False)
             self._is_playing = True
         elif not is_playing and self._is_playing:
             logger.info(f"{source}检测到媒体服务器 {self._media_server} 停止播放，恢复下载器 {self._downloader} 速度")
             if self._restore_on_stop:
-                self._restore_limit()
-            self._send_notification("停止播放，已恢复原速")
+                # 计算恢复的速度值用于通知
+                if self._restore_download_limit > 0 or self._restore_upload_limit > 0:
+                    restore_dl = self._restore_download_limit
+                    restore_ul = self._restore_upload_limit
+                else:
+                    restore_dl = self._original_download_limit
+                    restore_ul = self._original_upload_limit
+                
+                restore_info = f"已恢复限速：下载 {restore_dl}KB/s，上传 {restore_ul}KB/s"
+                self._send_notification("⏸️ 播放已结束", restore_info)
+                self._restore_limit(notify=False)
+            else:
+                self._send_notification("⏸️ 播放已结束", "限速保持，未自动恢复")
+            
             self._is_playing = False
-            self._last_stop_time = now
             self._last_playing_title = ""
 
     def _get_downloader_service(self):
@@ -301,24 +305,29 @@ class EmbyQBLimit(_PluginBase):
             return False
         return True
 
-    def _apply_limit(self):
+    def _apply_limit(self, notify: bool = True):
         """应用限速"""
         try:
             self._save_current_limits()
             self._set_downloader_limits(
                 download_limit=self._qb_download_limit,
-                upload_limit=self._qb_upload_limit
+                upload_limit=self._qb_upload_limit,
+                notify=notify
             )
         except Exception as e:
             logger.error(f"应用限速失败: {str(e)}")
 
-    def _restore_limit(self):
+    def _restore_limit(self, notify: bool = True):
         """恢复原速"""
         try:
-            dl = self._restore_download_limit if self._restore_download_limit is not None else self._original_download_limit
-            ul = self._restore_upload_limit if self._restore_upload_limit is not None else self._original_upload_limit
+            if self._restore_download_limit > 0 or self._restore_upload_limit > 0:
+                dl = self._restore_download_limit
+                ul = self._restore_upload_limit
+            else:
+                dl = self._original_download_limit
+                ul = self._original_upload_limit
 
-            self._set_downloader_limits(download_limit=dl, upload_limit=ul)
+            self._set_downloader_limits(download_limit=dl, upload_limit=ul, notify=notify)
             logger.info(f"已恢复下载器限速: 下载={dl}KB/s, 上传={ul}KB/s")
         except Exception as e:
             logger.error(f"恢复下载器限速失败: {str(e)}")
@@ -343,7 +352,7 @@ class EmbyQBLimit(_PluginBase):
         except Exception as e:
             logger.error(f"保存下载器限速设置失败: {str(e)}")
 
-    def _set_downloader_limits(self, download_limit: int, upload_limit: int):
+    def _set_downloader_limits(self, download_limit: int, upload_limit: int, notify: bool = True):
         """设置 MoviePilot 下载器限速"""
         try:
             service = self._get_downloader_service()
@@ -360,26 +369,41 @@ class EmbyQBLimit(_PluginBase):
                 raise RuntimeError("下载器返回设置失败")
 
             logger.info(f"已应用下载器限速: 下载={download_limit}KB/s, 上传={upload_limit}KB/s")
-            if int(download_limit or 0) > 0 or int(upload_limit or 0) > 0:
-                self._send_notification(f"已应用限速: 下载={download_limit}KB/s, 上传={upload_limit}KB/s")
+            if notify and (int(download_limit or 0) > 0 or int(upload_limit or 0) > 0):
+                self._send_notification(
+                    "🐢 已应用限速",
+                    f"下载：{download_limit}KB/s\n上传：{upload_limit}KB/s"
+                )
         except Exception as e:
             logger.error(f"设置下载器限速失败: {str(e)}")
-            self._send_notification(f"设置限速失败: {str(e)}")
+            self._send_notification(
+                "设置限速失败",
+                f"无法设置下载器限速：{str(e)}\n\n请检查下载器配置后重试"
+            )
 
-    def _send_notification(self, message: str):
-        """发送通知消息"""
+    def _send_notification(self, title: str, message: str = ""):
+        """发送通知消息
+        
+        Args:
+            title: 通知标题
+            message: 通知内容
+        """
         if not self._notify:
             return
+        
         try:
             self.post_message(
                 mtype=getattr(NotificationType, self._notify_type, NotificationType.Plugin),
-                title="Emby自动限速",
+                title=f"🎥 Emby限速助手 - {title}",
                 text=message
             )
         except Exception:
             try:
                 if self._message_helper:
-                    self._message_helper.put(title="Emby自动限速", message=message)
+                    self._message_helper.put(
+                        title=f"🎥 Emby限速助手 - {title}",
+                        message=message
+                    )
             except Exception as e:
                 logger.error(f"发送通知失败: {str(e)}")
 
@@ -524,12 +548,12 @@ class EmbyQBLimit(_PluginBase):
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "restore_download_limit", "label": "固定恢复下载限速", "type": "number", "suffix": "KB/s", "hint": "0 表示不限速", "persistent-hint": True}}]
+                                                "content": [{"component": "VTextField", "props": {"model": "restore_download_limit", "label": "固定恢复下载限速", "type": "number", "suffix": "KB/s", "hint": "0 使用播放前原始限速", "persistent-hint": True}}]
                                             },
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "restore_upload_limit", "label": "固定恢复上传限速", "type": "number", "suffix": "KB/s", "hint": "0 表示不限速", "persistent-hint": True}}]
+                                                "content": [{"component": "VTextField", "props": {"model": "restore_upload_limit", "label": "固定恢复上传限速", "type": "number", "suffix": "KB/s", "hint": "0 使用播放前原始限速", "persistent-hint": True}}]
                                             }
                                         ]
                                     }
@@ -556,18 +580,8 @@ class EmbyQBLimit(_PluginBase):
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
-                                                "content": [{"component": "VTextField", "props": {"model": "stop_cooldown", "label": "停止后冷却时间", "type": "number", "suffix": "秒", "hint": "停止播放后短时间忽略残留播放会话，避免刚恢复又被重新限速", "persistent-hint": True}}]
-                                            },
-                                            {
-                                                "component": "VCol",
-                                                "props": {"cols": 12, "md": 4},
                                                 "content": [{"component": "VTextField", "props": {"model": "whitelist_users", "label": "白名单用户", "placeholder": "多个用英文逗号分隔"}}]
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        "component": "VRow",
-                                        "content": [
+                                            },
                                             {
                                                 "component": "VCol",
                                                 "props": {"cols": 12, "md": 4},
@@ -590,7 +604,6 @@ class EmbyQBLimit(_PluginBase):
             "qb_download_limit": 1024,
             "qb_upload_limit": 1024,
             "check_interval": 10,
-            "stop_cooldown": 15,
             "whitelist_users": "",
             "whitelist_devices": "",
             "restore_on_stop": True,
