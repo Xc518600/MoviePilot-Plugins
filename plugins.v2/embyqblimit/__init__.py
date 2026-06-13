@@ -23,7 +23,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4.3"
+    plugin_version = "2.4.4"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
