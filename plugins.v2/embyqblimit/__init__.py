@@ -23,7 +23,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4"
+    plugin_version = "2.4.3"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -171,9 +171,9 @@ class EmbyQBLimit(_PluginBase):
         is_playing = self._check_media_server_playing()
         if is_playing and not self._is_playing:
             logger.info(f"{source}检测到媒体服务器 {self._media_server} 开始播放，开始限速下载器 {self._downloader}")
-            media_info = f"正在观看：{self._last_playing_title}" if self._last_playing_title else ""
-            limit_info = f"限速：下载 {self._qb_download_limit}KB/s，上传 {self._qb_upload_limit}KB/s"
-            self._send_notification("🎬 检测到开始播放", f"{media_info}\n{limit_info}")
+            media_info = f"{self._last_playing_title}" if self._last_playing_title else "未知媒体"
+            limit_info = f"已限速：下载 {self._qb_download_limit}KB/s，上传 {self._qb_upload_limit}KB/s"
+            self._send_notification("🎬 检测到播放", f"{media_info}\n{limit_info}")
             self._apply_limit(notify=False)
             self._is_playing = True
         elif not is_playing and self._is_playing:
@@ -187,11 +187,11 @@ class EmbyQBLimit(_PluginBase):
                     restore_dl = self._original_download_limit
                     restore_ul = self._original_upload_limit
                 
-                restore_info = f"已恢复限速：下载 {restore_dl}KB/s，上传 {restore_ul}KB/s"
-                self._send_notification("⏸️ 播放已结束", restore_info)
+                restore_info = f"已恢复：下载 {restore_dl}KB/s，上传 {restore_ul}KB/s"
+                self._send_notification("⏸️ 播放结束", restore_info)
                 self._restore_limit(notify=False)
             else:
-                self._send_notification("⏸️ 播放已结束", "限速保持，未自动恢复")
+                self._send_notification("⏸️ 播放结束", "未自动恢复限速")
             
             self._is_playing = False
             self._last_playing_title = ""
@@ -377,8 +377,8 @@ class EmbyQBLimit(_PluginBase):
         except Exception as e:
             logger.error(f"设置下载器限速失败: {str(e)}")
             self._send_notification(
-                "设置限速失败",
-                f"无法设置下载器限速：{str(e)}\n\n请检查下载器配置后重试"
+                "限速设置失败",
+                f"{str(e)}\n请检查下载器配置"
             )
 
     def _send_notification(self, title: str, message: str = ""):
