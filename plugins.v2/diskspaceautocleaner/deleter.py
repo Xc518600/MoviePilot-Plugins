@@ -77,6 +77,16 @@ class DiskSpaceDeleter:
                     logger.warning(msg)
                     errors.append(msg)
                     continue
+
+                if DiskSpaceUtils.is_series_candidate(path):
+                    series_ok, series_reason = DiskSpaceUtils.is_completed_complete_series(
+                        path, max_scan_items=self._plugin._max_scan_items
+                    )
+                    if not series_ok:
+                        msg = f"跳过未完结或未完整入库的电视剧：{path}，原因={series_reason}"
+                        logger.warning(msg)
+                        errors.append(msg)
+                        continue
                 
                 if not path.exists():
                     logger.info(f"跳过不存在的路径：{path}")

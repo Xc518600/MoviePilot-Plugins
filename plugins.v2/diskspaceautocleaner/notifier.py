@@ -115,6 +115,7 @@ class DiskSpaceNotifier:
             f"扫描{diagnosis.get('items_scanned', 0)}项",
             f"保护跳过{diagnosis.get('protected_skipped', 0)}",
             f"最近保护跳过{diagnosis.get('recent_skipped', 0)}",
+            f"未完结/不完整电视剧跳过{diagnosis.get('incomplete_series_skipped', 0)}",
             f"空大小跳过{diagnosis.get('zero_size_skipped', 0)}",
             f"缺失路径{diagnosis.get('roots_missing', 0)}",
             f"候选深度{diagnosis.get('candidate_depth', '')}",

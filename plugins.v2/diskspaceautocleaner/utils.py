@@ -1,13 +1,24 @@
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.log import logger
 
 
 class DiskSpaceUtils:
     """硬盘空间自动清理工具类。"""
+    VIDEO_EXTENSIONS = {
+        ".mp4", ".mkv", ".avi", ".rmvb", ".flv", ".wmv", ".ts", ".mov", ".m4v",
+        ".mpg", ".mpeg", ".webm", ".iso", ".m2ts", ".strm"
+    }
+    ONGOING_SERIES_MARKERS = {
+        "未完结", "连载", "连载中", "更新中", "未完待续", "未完", "ongoing",
+        "continuing", "returning series", "in production"
+    }
+    COMPLETED_SERIES_MARKERS = {
+        "已完结", "完结", "全集", "全剧终", "complete", "completed", "ended", "status>ended"
+    }
     
     @staticmethod
     def to_bool(value: Any, default: bool = False) -> bool:
@@ -68,6 +79,120 @@ class DiskSpaceUtils:
         except Exception:
             pass
         return False
+
+    @staticmethod
+    def is_series_candidate(path: Path) -> bool:
+        """判断候选项是否应按电视剧处理。"""
+        try:
+            if DiskSpaceUtils.detect_root_type(path) == "电视剧":
+                return True
+            if DiskSpaceUtils.is_series_folder(path):
+                return True
+            path_lower = path.as_posix().lower()
+            return any(k in path_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"])
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_series_metadata_text(path: Path, max_files: int = 8, max_chars: int = 200_000) -> str:
+        """读取电视剧目录内少量 NFO/元数据文本，用于判断完结状态。读取失败时返回空文本。"""
+        chunks: List[str] = [path.name]
+        candidates: List[Path] = []
+        try:
+            if path.is_file():
+                candidates.append(path.with_suffix(".nfo"))
+            elif path.is_dir():
+                preferred = [path / "tvshow.nfo", path / "show.nfo", path / "series.nfo"]
+                candidates.extend(preferred)
+                candidates.extend(sorted(path.glob("*.nfo"))[:max_files])
+        except Exception:
+            return " ".join(chunks)
+
+        seen = set()
+        total_chars = 0
+        for item in candidates:
+            try:
+                if item in seen or not item.exists() or not item.is_file():
+                    continue
+                seen.add(item)
+                text = item.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+                chunks.append(text)
+                total_chars += len(text)
+                if total_chars >= max_chars:
+                    break
+            except Exception:
+                continue
+        return "\n".join(chunks)
+
+    @staticmethod
+    def _extract_expected_episode_count(text: str) -> Optional[int]:
+        """从目录名/NFO 中提取“全 N 集/共 N 集/N 集全”等总集数。"""
+        patterns = [
+            r"(?:全|共|全集|完结|已完结)\s*(\d{1,4})\s*(?:集|话|話|episodes?|eps?)",
+            r"(\d{1,4})\s*(?:集|话|話)\s*(?:全|完结|已完结)",
+            r"(?:totalepisodes|episodecount|episodes?)\s*[:：>\s]+(\d{1,4})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                value = int(match.group(1))
+                if 1 <= value <= 2000:
+                    return value
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def count_video_files(path: Path, max_items: int = 10000) -> int:
+        """统计候选目录下的视频文件数量，超过 max_items 时提前停止。"""
+        count = 0
+        try:
+            if path.is_file():
+                return 1 if path.suffix.lower() in DiskSpaceUtils.VIDEO_EXTENSIONS else 0
+            for root, _, files in os.walk(path):
+                for name in files:
+                    if Path(name).suffix.lower() in DiskSpaceUtils.VIDEO_EXTENSIONS:
+                        count += 1
+                        if count >= max_items:
+                            return count
+        except Exception:
+            return count
+        return count
+
+    @staticmethod
+    def is_completed_complete_series(path: Path, max_scan_items: int = 10000) -> Tuple[bool, str]:
+        """
+        电视剧删除保护：必须能明确证明“已完结”且“本地集数完整”才允许删除。
+
+        证明方式采用保守本地判断：
+        - 路径名或 NFO 明确出现完结标记；
+        - 路径名或 NFO 能提取总集数；
+        - 本地视频文件数量 >= 总集数；
+        任一条件不满足就返回 False，避免误删未完结电视剧。
+        """
+        if not DiskSpaceUtils.is_series_candidate(path):
+            return True, "非电视剧候选"
+
+        metadata_text = DiskSpaceUtils._read_series_metadata_text(path)
+        metadata_lower = metadata_text.lower()
+        if any(marker.lower() in metadata_lower for marker in DiskSpaceUtils.ONGOING_SERIES_MARKERS):
+            return False, "电视剧包含未完结/连载标记"
+
+        has_completed_marker = any(marker.lower() in metadata_lower for marker in DiskSpaceUtils.COMPLETED_SERIES_MARKERS)
+        if not has_completed_marker:
+            return False, "电视剧未发现明确完结标记"
+
+        expected_count = DiskSpaceUtils._extract_expected_episode_count(metadata_text)
+        if not expected_count:
+            return False, "电视剧未发现总集数，无法确认完整"
+
+        local_count = DiskSpaceUtils.count_video_files(path, max_items=max_scan_items)
+        if local_count < expected_count:
+            return False, f"电视剧本地集数不完整：{local_count}/{expected_count}"
+
+        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}"
 
     @staticmethod
     def detect_root_type(path: Path) -> str:

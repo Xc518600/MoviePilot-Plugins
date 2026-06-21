@@ -36,6 +36,7 @@ class DiskSpaceScanner:
             "items_scanned": 0,
             "protected_skipped": 0,
             "recent_skipped": 0,
+            "incomplete_series_skipped": 0,
             "zero_size_skipped": 0,
             "error_skipped": 0,
             "candidate_depth": max(1, int(self._plugin._candidate_depth or 2)),
@@ -78,6 +79,7 @@ class DiskSpaceScanner:
                         diagnosis["roots_rejected"] += root_diagnosis.get("roots_rejected", 0)
                         diagnosis["protected_skipped"] += root_diagnosis.get("protected_skipped", 0)
                         diagnosis["recent_skipped"] += root_diagnosis.get("recent_skipped", 0)
+                        diagnosis["incomplete_series_skipped"] += root_diagnosis.get("incomplete_series_skipped", 0)
                         diagnosis["zero_size_skipped"] += root_diagnosis.get("zero_size_skipped", 0)
                         diagnosis["error_skipped"] += root_diagnosis.get("error_skipped", 0)
                         diagnosis["cache_hits"] += root_diagnosis.get("cache_hits", 0)
@@ -97,7 +99,8 @@ class DiskSpaceScanner:
         logger.info(
             f"候选扫描完成：候选={len(candidates)}项，扫描={diagnosis['items_scanned']}项，"
             f"缺失={diagnosis['roots_missing']}，保护跳过={diagnosis['protected_skipped']}，"
-            f"最近跳过={diagnosis['recent_skipped']}，错误={diagnosis['error_skipped']}，耗时={scan_time:.2f}秒"
+            f"最近跳过={diagnosis['recent_skipped']}，电视剧未完结/不完整跳过={diagnosis['incomplete_series_skipped']}，"
+            f"错误={diagnosis['error_skipped']}，耗时={scan_time:.2f}秒"
         )
         
         return sorted(candidates, key=lambda x: x.get("score", 0), reverse=True), diagnosis
@@ -114,6 +117,7 @@ class DiskSpaceScanner:
             "roots_rejected": 0,
             "protected_skipped": 0,
             "recent_skipped": 0,
+            "incomplete_series_skipped": 0,
             "zero_size_skipped": 0,
             "error_skipped": 0,
             "cache_hits": 0,
@@ -147,6 +151,15 @@ class DiskSpaceScanner:
                     if recent_seconds and now - stat.st_mtime < recent_seconds:
                         diagnosis["recent_skipped"] += 1
                         continue
+
+                    if DiskSpaceUtils.is_series_candidate(child):
+                        series_ok, series_reason = DiskSpaceUtils.is_completed_complete_series(
+                            child, max_scan_items=self._plugin._max_scan_items
+                        )
+                        if not series_ok:
+                            diagnosis["incomplete_series_skipped"] += 1
+                            logger.info(f"跳过电视剧候选：{child.name}，原因={series_reason}")
+                            continue
                     
                     # 使用缓存获取大小（兼容TTL缓存）
                     cache_key = f"{child.as_posix()}:{stat.st_mtime}"
