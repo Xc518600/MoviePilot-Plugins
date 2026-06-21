@@ -1,5 +1,6 @@
 import os
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +20,11 @@ class DiskSpaceUtils:
     COMPLETED_SERIES_MARKERS = {
         "已完结", "完结", "全集", "全剧终", "complete", "completed", "ended", "status>ended"
     }
+    EPISODE_METADATA_TAGS = {
+        "totalepisodes", "total_episodes", "episodecount", "episode_count", "numberofepisodes",
+        "number_of_episodes", "episodes", "aired_episodes", "airedepisodes"
+    }
+    STATUS_METADATA_TAGS = {"status", "state", "seriesstatus"}
     
     @staticmethod
     def to_bool(value: Any, default: bool = False) -> bool:
@@ -125,6 +131,179 @@ class DiskSpaceUtils:
         return "\n".join(chunks)
 
     @staticmethod
+    def _strip_xml_ns(tag: str) -> str:
+        """去除 XML 命名空间并统一小写。"""
+        return str(tag or "").split("}")[-1].strip().lower()
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        """从字符串/数字中安全提取正整数。"""
+        if value is None:
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                number = int(value)
+                return number if 1 <= number <= 5000 else None
+            match = re.search(r"\d{1,4}", str(value))
+            if not match:
+                return None
+            number = int(match.group(0))
+            return number if 1 <= number <= 5000 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_xml_file(path: Path) -> Optional[ET.Element]:
+        """宽容解析 XML/NFO 文件，失败返回 None。"""
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if not text.strip():
+                return None
+            return ET.fromstring(text.encode("utf-8"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _collect_nfo_files(path: Path, max_files: int = 300) -> List[Path]:
+        """收集候选电视剧目录里的 NFO 文件，优先读取剧集/季元数据，再读取分集元数据。"""
+        try:
+            if path.is_file():
+                nfo = path.with_suffix(".nfo")
+                return [nfo] if nfo.exists() else []
+            if not path.is_dir():
+                return []
+
+            preferred_names = {"tvshow.nfo", "show.nfo", "series.nfo", "season.nfo"}
+            preferred: List[Path] = []
+            others: List[Path] = []
+            for root, _, files in os.walk(path):
+                for name in files:
+                    if not name.lower().endswith(".nfo"):
+                        continue
+                    item = Path(root) / name
+                    if name.lower() in preferred_names:
+                        preferred.append(item)
+                    else:
+                        others.append(item)
+                    if len(preferred) + len(others) >= max_files:
+                        break
+                if len(preferred) + len(others) >= max_files:
+                    break
+            return sorted(preferred) + sorted(others)
+        except Exception:
+            return []
+
+    @staticmethod
+    def _extract_xml_metadata(path: Path, max_files: int = 300) -> Dict[str, Any]:
+        """解析 MoviePilot/Emby/Jellyfin/Kodi 常见 NFO/TMDB 风格元数据。"""
+        status_values: List[str] = []
+        episode_counts: List[int] = []
+        episode_keys = set()
+        parsed_files = 0
+
+        for nfo in DiskSpaceUtils._collect_nfo_files(path, max_files=max_files):
+            root = DiskSpaceUtils._parse_xml_file(nfo)
+            if root is None:
+                continue
+            parsed_files += 1
+            root_name = DiskSpaceUtils._strip_xml_ns(root.tag)
+            current_season: Optional[int] = None
+            current_episode: Optional[int] = None
+            for elem in root.iter():
+                tag = DiskSpaceUtils._strip_xml_ns(elem.tag)
+                text = (elem.text or "").strip()
+                if not text:
+                    continue
+                if tag in DiskSpaceUtils.STATUS_METADATA_TAGS:
+                    status_values.append(text)
+                if root_name not in {"episodedetails", "episode"} and tag in DiskSpaceUtils.EPISODE_METADATA_TAGS:
+                    number = DiskSpaceUtils._safe_int(text)
+                    if number:
+                        episode_counts.append(number)
+                if tag in {"season", "seasonnumber"}:
+                    current_season = DiskSpaceUtils._safe_int(text)
+                elif tag in {"episode", "episodenumber"}:
+                    current_episode = DiskSpaceUtils._safe_int(text)
+
+            if root_name in {"episodedetails", "episode"} and current_episode:
+                episode_keys.add((current_season or 1, current_episode))
+
+        return {
+            "parsed_nfo_files": parsed_files,
+            "status_values": status_values,
+            "episode_counts": episode_counts,
+            "episode_keys": episode_keys,
+        }
+
+    @staticmethod
+    def _extract_episode_keys_from_name(name: str) -> List[Tuple[int, int]]:
+        """从文件名中提取 SxxEyy / 第xx集 / Exx 等分集编号。"""
+        keys: List[Tuple[int, int]] = []
+        text = str(name or "")
+        for match in re.finditer(r"[Ss](\d{1,2})[ ._-]*[Ee](\d{1,4})", text):
+            season = DiskSpaceUtils._safe_int(match.group(1)) or 1
+            episode = DiskSpaceUtils._safe_int(match.group(2))
+            if episode:
+                keys.append((season, episode))
+        for match in re.finditer(r"(?:第\s*)?(\d{1,4})\s*(?:集|话|話)", text):
+            episode = DiskSpaceUtils._safe_int(match.group(1))
+            if episode:
+                keys.append((1, episode))
+        if not keys:
+            match = re.search(r"(?:^|[ ._\-])E(\d{1,4})(?:\D|$)", text, flags=re.IGNORECASE)
+            if match:
+                episode = DiskSpaceUtils._safe_int(match.group(1))
+                if episode:
+                    keys.append((1, episode))
+        return keys
+
+    @staticmethod
+    def collect_local_episode_keys(path: Path, max_items: int = 10000) -> set:
+        """从本地视频文件名和分集 NFO 中收集唯一集编号。"""
+        keys = set()
+        scanned = 0
+        try:
+            files: List[Path] = []
+            if path.is_file():
+                files = [path]
+            elif path.is_dir():
+                for root, _, names in os.walk(path):
+                    for name in names:
+                        suffix = Path(name).suffix.lower()
+                        if suffix in DiskSpaceUtils.VIDEO_EXTENSIONS or suffix == ".nfo":
+                            files.append(Path(root) / name)
+                            scanned += 1
+                            if scanned >= max_items:
+                                break
+                    if scanned >= max_items:
+                        break
+            for item in files:
+                if item.suffix.lower() in DiskSpaceUtils.VIDEO_EXTENSIONS:
+                    for key in DiskSpaceUtils._extract_episode_keys_from_name(item.name):
+                        keys.add(key)
+                    continue
+                root = DiskSpaceUtils._parse_xml_file(item)
+                if root is None:
+                    continue
+                root_name = DiskSpaceUtils._strip_xml_ns(root.tag)
+                if root_name not in {"episodedetails", "episode"}:
+                    continue
+                season = None
+                episode = None
+                for elem in root.iter():
+                    tag = DiskSpaceUtils._strip_xml_ns(elem.tag)
+                    text = (elem.text or "").strip()
+                    if tag in {"season", "seasonnumber"}:
+                        season = DiskSpaceUtils._safe_int(text)
+                    elif tag in {"episode", "episodenumber"}:
+                        episode = DiskSpaceUtils._safe_int(text)
+                if episode:
+                    keys.add((season or 1, episode))
+        except Exception:
+            pass
+        return keys
+
+    @staticmethod
     def _extract_expected_episode_count(text: str) -> Optional[int]:
         """从目录名/NFO 中提取“全 N 集/共 N 集/N 集全”等总集数。"""
         patterns = [
@@ -166,10 +345,10 @@ class DiskSpaceUtils:
         """
         电视剧删除保护：必须能明确证明“已完结”且“本地集数完整”才允许删除。
 
-        证明方式采用保守本地判断：
-        - 路径名或 NFO 明确出现完结标记；
-        - 路径名或 NFO 能提取总集数；
-        - 本地视频文件数量 >= 总集数；
+        智能判断顺序：
+        - 优先解析 MoviePilot/Emby/Jellyfin/Kodi 常见 NFO/TMDB 风格元数据；
+        - 再回退到路径名/NFO 文本中的“已完结/全 N 集”等标记；
+        - 本地完整性优先按唯一集编号统计，无法识别编号时再按视频文件数量兜底；
         任一条件不满足就返回 False，避免误删未完结电视剧。
         """
         if not DiskSpaceUtils.is_series_candidate(path):
@@ -177,22 +356,32 @@ class DiskSpaceUtils:
 
         metadata_text = DiskSpaceUtils._read_series_metadata_text(path)
         metadata_lower = metadata_text.lower()
-        if any(marker.lower() in metadata_lower for marker in DiskSpaceUtils.ONGOING_SERIES_MARKERS):
+        xml_meta = DiskSpaceUtils._extract_xml_metadata(path, max_files=max(50, min(max_scan_items, 300)))
+        status_values = [str(x).strip().lower() for x in xml_meta.get("status_values") or [] if str(x).strip()]
+
+        combined_status_text = "\n".join([metadata_lower, *status_values])
+        if any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.ONGOING_SERIES_MARKERS):
             return False, "电视剧包含未完结/连载标记"
 
-        has_completed_marker = any(marker.lower() in metadata_lower for marker in DiskSpaceUtils.COMPLETED_SERIES_MARKERS)
+        has_completed_marker = any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.COMPLETED_SERIES_MARKERS)
         if not has_completed_marker:
             return False, "电视剧未发现明确完结标记"
 
-        expected_count = DiskSpaceUtils._extract_expected_episode_count(metadata_text)
+        episode_counts = [int(x) for x in (xml_meta.get("episode_counts") or []) if isinstance(x, int) and x > 0]
+        expected_count = max(episode_counts) if episode_counts else DiskSpaceUtils._extract_expected_episode_count(metadata_text)
         if not expected_count:
             return False, "电视剧未发现总集数，无法确认完整"
 
-        local_count = DiskSpaceUtils.count_video_files(path, max_items=max_scan_items)
+        local_episode_keys = DiskSpaceUtils.collect_local_episode_keys(path, max_items=max_scan_items)
+        xml_episode_keys = xml_meta.get("episode_keys") or set()
+        if xml_episode_keys:
+            local_episode_keys.update(xml_episode_keys)
+        local_count = len(local_episode_keys) if local_episode_keys else DiskSpaceUtils.count_video_files(path, max_items=max_scan_items)
         if local_count < expected_count:
             return False, f"电视剧本地集数不完整：{local_count}/{expected_count}"
 
-        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}"
+        source = "NFO/TMDB元数据" if xml_meta.get("parsed_nfo_files") else "本地文本标记"
+        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}（来源={source}）"
 
     @staticmethod
     def detect_root_type(path: Path) -> str:
