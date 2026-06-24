@@ -352,6 +352,26 @@ class DiskSpaceUtils:
             return None, None
 
     @staticmethod
+    def _extract_expected_episode_count(text: str) -> Optional[int]:
+        """从目录名/NFO 中提取“全 N 集/共 N 集/N 集全”等总集数。"""
+        patterns = [
+            r"(?:全|共|全集|完结|已完结)\s*(\d{1,4})\s*(?:集|话|話|episodes?|eps?)",
+            r"(\d{1,4})\s*(?:集|话|話)\s*(?:全|完结|已完结)",
+            r"(?:totalepisodes|episodecount|episodes?)\s*[:：>\s]+(\d{1,4})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                value = int(match.group(1))
+                if 1 <= value <= 2000:
+                    return value
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:
         """统计候选目录下的视频文件数量，超过 max_items 时提前停止。"""
         count = 0
@@ -371,23 +391,46 @@ class DiskSpaceUtils:
     @staticmethod
     def is_completed_complete_series(path: Path, max_scan_items: int = 10000, media_chain=None) -> Tuple[bool, str]:
         """
-        电视剧删除保护：通过 TMDB 查询确认“已完结”且“本地集数完整”才允许删除。
+        电视剧删除保护：优先 TMDB 查询，失败时回退到本地解析。
         """
         if not DiskSpaceUtils.is_series_candidate(path):
             return True, "非电视剧候选"
 
-        # 从 TMDB 获取总集数和完结状态
+        # 优先从 TMDB 获取总集数和完结状态
         expected_count, tmdb_status = DiskSpaceUtils.get_tmdb_episode_count(path, media_chain)
         
+        # TMDB 查询失败，回退到本地解析
         if not expected_count:
-            return False, "无法从 TMDB 获取电视剧总集数"
+            logger.info(f"TMDB 查询失败，回退到本地解析: {path.name}")
+            metadata_text = DiskSpaceUtils._read_series_metadata_text(path)
+            metadata_lower = metadata_text.lower()
+            xml_meta = DiskSpaceUtils._extract_xml_metadata(path, max_files=max(50, min(max_scan_items, 300)))
+            status_values = [str(x).strip().lower() for x in xml_meta.get("status_values") or [] if str(x).strip()]
+            combined_status_text = "\n".join([metadata_lower, *status_values])
+            
+            # 检查未完结标记
+            if any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.ONGOING_SERIES_MARKERS):
+                return False, "电视剧包含未完结/连载标记"
+            
+            # 检查已完结标记
+            has_completed_marker = any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.COMPLETED_SERIES_MARKERS)
+            if not has_completed_marker:
+                return False, "电视剧未发现明确完结标记"
+            
+            # 从 NFO/目录名提取总集数
+            episode_counts = [int(x) for x in (xml_meta.get("episode_counts") or []) if isinstance(x, int) and x > 0]
+            expected_count = max(episode_counts) if episode_counts else DiskSpaceUtils._extract_expected_episode_count(metadata_text)
+            
+            if not expected_count:
+                return False, "电视剧未发现总集数，无法确认完整"
+            
+            tmdb_status = None  # 本地解析模式没有 TMDB 状态
         
-        # 检查 TMDB 状态是否为已完结
+        # 检查完结状态（TMDB 模式）
         if tmdb_status:
             status_lower = str(tmdb_status).lower()
             if status_lower in ["ended", "completed", "canceled"]:
-                # 已完结，继续检查本地集数
-                pass
+                pass  # 已完结
             elif status_lower in ["returning series", "planned", "in production", "ongoing"]:
                 return False, f"电视剧未完结（TMDB状态={tmdb_status}）"
         
@@ -402,7 +445,8 @@ class DiskSpaceUtils:
         if local_count < expected_count:
             return False, f"电视剧本地集数不完整：{local_count}/{expected_count}"
         
-        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}（来源=TMDB）"
+        source = "TMDB" if tmdb_status else "本地解析"
+        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}（来源={source}）"
 
     @staticmethod
     def detect_root_type(path: Path) -> str:
