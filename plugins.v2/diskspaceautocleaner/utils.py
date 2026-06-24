@@ -28,6 +28,27 @@ class DiskSpaceUtils:
         "number_of_episodes", "episodes", "aired_episodes", "airedepisodes"
     }
     STATUS_METADATA_TAGS = {"status", "state", "seriesstatus"}
+
+    @staticmethod
+    def build_tmdb_titles(path: Path) -> List[str]:
+        """为 TMDB 识别构造多个标题候选：原名、带年份名、清洗名。"""
+        raw_name = path.stem if path.is_file() else path.name
+        cleaned = DiskSpaceUtils.extract_movie_title(path)
+        titles: List[str] = []
+
+        def add_title(value: Optional[str]):
+            text = str(value or "").strip()
+            if text and text not in titles:
+                titles.append(text)
+
+        add_title(raw_name)
+
+        year_match = re.search(r'(19|20)\d{2}', raw_name)
+        if cleaned and year_match:
+            add_title(f"{cleaned} {year_match.group(0)}")
+
+        add_title(cleaned)
+        return titles
     
     @staticmethod
     def to_bool(value: Any, default: bool = False) -> bool:
@@ -317,55 +338,54 @@ class DiskSpaceUtils:
             return None, None
             
         try:
-            title = DiskSpaceUtils.extract_movie_title(path)
-            if not title:
+            titles = DiskSpaceUtils.build_tmdb_titles(path)
+            if not titles:
                 logger.warning(f"TMDB 查询失败: {path.name} - 无法从目录名提取标题")
                 return None, None
 
-            meta_info = MetaInfo(title)
-            # 设置为电视剧类型
-            meta_info.type = MediaType.TV
-            logger.info(f"TMDB 查询开始: path={path.name}, title={title}, type={meta_info.type}")
-            
-            # 通过 MediaChain 识别媒体信息
-            mediainfo = media_chain.recognize_media(meta=meta_info)
-            if not mediainfo:
-                logger.warning(f"TMDB 查询失败: {path.name} - recognize_media 未识别到媒体信息, title={title}")
-                return None, None
-            
-            # 获取 TMDB ID
-            tmdb_id = mediainfo.tmdb_id
-            if not tmdb_id:
-                logger.warning(
-                    f"TMDB 查询失败: {path.name} - recognize_media 未返回 tmdb_id, "
-                    f"title={title}, mediainfo_title={getattr(mediainfo, 'title', None)}, year={getattr(mediainfo, 'year', None)}"
-                )
-                return None, None
-            
-            # 获取 TMDB 详细信息
-            tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=MediaType.TV)
-            
-            if not tmdb_info:
-                logger.warning(f"TMDB 查询失败: {path.name} - tmdb_info 返回空, tmdb_id={tmdb_id}, title={title}")
-                return None, None
-            
-            # 返回总集数和状态
-            total_episodes = tmdb_info.get("number_of_episodes") or tmdb_info.get("total_episodes") or tmdb_info.get("episode_count")
-            status = tmdb_info.get("status")
+            logger.info(f"TMDB 查询开始: path={path.name}, titles={titles}")
 
-            if not total_episodes:
-                logger.warning(
-                    f"TMDB 查询失败: {path.name} - TMDB 详情缺少总集数字段, "
-                    f"tmdb_id={tmdb_id}, keys={list(tmdb_info.keys())[:20]}"
-                )
-                return None, status
+            last_status = None
+            for title in titles:
+                meta_info = MetaInfo(title)
+                meta_info.type = MediaType.TV
 
-            logger.info(
-                f"TMDB 查询成功: path={path.name}, title={title}, tmdb_id={tmdb_id}, "
-                f"total_episodes={total_episodes}, status={status}"
-            )
-            
-            return total_episodes, status
+                mediainfo = media_chain.recognize_media(meta=meta_info)
+                if not mediainfo:
+                    logger.warning(f"TMDB 查询失败: {path.name} - recognize_media 未识别到媒体信息, title={title}")
+                    continue
+
+                tmdb_id = mediainfo.tmdb_id
+                if not tmdb_id:
+                    logger.warning(
+                        f"TMDB 查询失败: {path.name} - recognize_media 未返回 tmdb_id, "
+                        f"title={title}, mediainfo_title={getattr(mediainfo, 'title', None)}, year={getattr(mediainfo, 'year', None)}"
+                    )
+                    continue
+
+                tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=MediaType.TV)
+                if not tmdb_info:
+                    logger.warning(f"TMDB 查询失败: {path.name} - tmdb_info 返回空, tmdb_id={tmdb_id}, title={title}")
+                    continue
+
+                total_episodes = tmdb_info.get("number_of_episodes") or tmdb_info.get("total_episodes") or tmdb_info.get("episode_count")
+                status = tmdb_info.get("status")
+                last_status = status
+
+                if not total_episodes:
+                    logger.warning(
+                        f"TMDB 查询失败: {path.name} - TMDB 详情缺少总集数字段, "
+                        f"tmdb_id={tmdb_id}, title={title}, keys={list(tmdb_info.keys())[:20]}"
+                    )
+                    continue
+
+                logger.info(
+                    f"TMDB 查询成功: path={path.name}, title={title}, tmdb_id={tmdb_id}, "
+                    f"total_episodes={total_episodes}, status={status}"
+                )
+                return total_episodes, status
+
+            return None, last_status
             
         except Exception as e:
             logger.warning(f"TMDB 查询失败: {path.name} - {str(e)}")
