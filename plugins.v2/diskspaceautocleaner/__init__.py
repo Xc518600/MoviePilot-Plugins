@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.10"
+    plugin_version = "3.2.11"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -105,11 +105,22 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return [
             {
                 "path": "/run_now",
+                "endpoint": self.run_now,
                 "summary": "立即运行空间检查",
                 "description": "手动触发硬盘空间检查并生成清理建议，不受定时检查间隔限制。",
                 "methods": ["POST"]
             }
         ]
+
+    def run_now(self):
+        """插件 API：立即运行一次空间检查。"""
+        try:
+            logger.info("硬盘空间自动清理收到 API 立即运行请求")
+            threading.Thread(target=self._run_check, daemon=True).start()
+            return {"success": True, "message": "已开始后台执行空间检查"}
+        except Exception as e:
+            logger.error(f"硬盘空间自动清理 API 立即运行失败：{e}", exc_info=True)
+            return {"success": False, "message": f"立即运行失败：{e}"}
 
     def stop_service(self):
         with self._lock:
