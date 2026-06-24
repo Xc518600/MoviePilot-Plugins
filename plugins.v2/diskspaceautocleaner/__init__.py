@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
+from app.chain.media import MediaChain
 
 from .utils import DiskSpaceUtils
 from .scanner import DiskSpaceScanner
@@ -19,7 +20,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.17"
+    plugin_version = "3.2.18"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -45,6 +46,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _run_once = False
     _tmdb_rating_cache: Dict[str, Dict[str, Any]] = {}
+    _poster_cache: Dict[str, Optional[str]] = {}
+    _blank_poster = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAACWCAQAAACCseXNAAAAkklEQVR42u3PAREAAAQEMJ9cFFUVkMBtDZbpeiEiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIpcFcbGoK4SMl3wAAAAASUVORK5CYII="
 
     _size_cache: Dict[str, int] = {}
     _size_cache_lock = threading.Lock()
@@ -367,7 +370,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         }
 
     def _build_candidate_card(self, item: Dict[str, Any], rank: int) -> Dict[str, Any]:
-        poster = item.get("poster") or "/assets/no-image-CweBJ8Ee.jpeg"
+        poster = self._resolve_candidate_poster(item) or self._blank_poster
         name = item.get("tmdb_title") or item.get("name") or "未知媒体"
         title = str(name)
         if len(title) > 18:
@@ -410,6 +413,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                         "aspect-ratio": "2/3",
                                         "class": "object-cover shadow ring-gray-500",
                                         "cover": True,
+                                        "transition": True,
+                                        "lazy-src": self._blank_poster,
                                     }
                                 }
                             ]
@@ -434,6 +439,31 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 }
             ]
         }
+
+    def _resolve_candidate_poster(self, item: Dict[str, Any]) -> Optional[str]:
+        """页面展示时兜底补海报，兼容旧历史里未保存 poster 的候选。"""
+        poster = item.get("poster")
+        if poster:
+            return poster
+
+        key = str(item.get("tmdb_id") or item.get("path") or item.get("name") or "")
+        if key in self._poster_cache:
+            return self._poster_cache.get(key)
+
+        poster = None
+        try:
+            tmdb_id = item.get("tmdb_id")
+            tmdb_type = item.get("tmdb_type") or "movie"
+            if tmdb_id:
+                media_chain = MediaChain()
+                mtype = DiskSpaceUtils.tmdb_type_to_media_type(tmdb_type)
+                tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=mtype)
+                poster = DiskSpaceUtils.get_media_poster(None, tmdb_info)
+        except Exception as e:
+            logger.debug(f"候选海报兜底查询失败：{item.get('name') or item.get('path')} - {e}")
+
+        self._poster_cache[key] = poster
+        return poster
 
     def _schedule_next(self, initial: bool = False):
         if not self._enabled:

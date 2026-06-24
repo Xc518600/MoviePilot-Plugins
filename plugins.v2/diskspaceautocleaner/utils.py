@@ -536,6 +536,11 @@ class DiskSpaceUtils:
         return None
 
     @staticmethod
+    def tmdb_type_to_media_type(tmdb_type: Any):
+        """将页面保存的 tmdb_type 转成 MoviePilot MediaType。"""
+        return MediaType.TV if str(tmdb_type or "").lower() == "tv" else MediaType.MOVIE
+
+    @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:
         """统计候选目录下的视频文件数量，超过 max_items 时提前停止。"""
         count = 0
