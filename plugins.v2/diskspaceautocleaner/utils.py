@@ -4,6 +4,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.chain.media import MediaChain
+from app.core.metainfo import MetaInfoPath
 from app.log import logger
 from app.schemas import MediaType
 
@@ -320,33 +322,33 @@ class DiskSpaceUtils:
             if not title:
                 return None, None
             
-            # 通过 MediaChain 查询 TMDB
-            meta_info = media_chain.recognize_media(title)
+            # 使用 MetaInfoPath 解析路径
+            meta_info = MetaInfoPath(path)
             if not meta_info:
                 return None, None
             
-            # 获取 TMDB 详细信息
-            media_id = meta_info.tmdb_id
-            if not media_id:
+            # 获取 TMDB ID
+            tmdb_id = media_chain.recognize_by_tmdb(meta_info)
+            if not tmdb_id:
                 return None, None
             
-            # 获取媒体信息
-            media_detail = media_chain.get_tmdb_info(
-                tmdb_id=media_id,
+            # 获取 TMDB 详细信息
+            tmdb_info = media_chain.get_tmdb_info(
+                tmdb_id=tmdb_id,
                 mtype=MediaType.TV
             )
             
-            if not media_detail:
+            if not tmdb_info:
                 return None, None
             
             # 返回总集数和状态
-            total_episodes = media_detail.get("total_episodes") or media_detail.get("episode_count")
-            status = media_detail.get("status")
+            total_episodes = tmdb_info.get("number_of_episodes") or tmdb_info.get("total_episodes") or tmdb_info.get("episode_count")
+            status = tmdb_info.get("status")
             
             return total_episodes, status
             
         except Exception as e:
-            logger.warning(f"TMDB 查询失败: {path} - {str(e)}")
+            logger.warning(f"TMDB 查询失败: {path.name} - {str(e)}")
             return None, None
 
     @staticmethod
