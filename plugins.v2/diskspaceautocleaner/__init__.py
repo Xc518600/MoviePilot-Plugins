@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.13"
+    plugin_version = "3.2.14"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -307,6 +307,13 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 ]
             })
 
+        latest_candidates = []
+        for item in history:
+            candidates = item.get("all_candidates") or item.get("candidates") or []
+            if candidates:
+                latest_candidates = sorted(candidates, key=lambda x: float(x.get("score") or 0), reverse=True)
+                break
+
         return [
             {
                 "component": "VAlert",
@@ -333,8 +340,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             },
             {
                 "component": "VAlert",
-                "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。"}
+                "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。最新候选评分榜按删除优先级排序，排第一的是当前最优先删除。"}
             },
+            self._build_latest_candidates_panel(latest_candidates),
             {
                 "component": "VTable",
                 "props": {"hover": True, "density": "compact", "fixed-header": True, "style": {"max-height": "620px", "overflow-y": "auto"}},
@@ -354,6 +362,108 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 ]
             }
         ]
+
+    def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """构建最新一轮候选评分榜：第一名就是当前最优先删除。"""
+        if not candidates:
+            return {
+                "component": "VAlert",
+                "props": {"type": "warning", "variant": "tonal", "text": "最新一轮还没有候选评分数据。请先运行一次空间检查。"}
+            }
+
+        cards = []
+        for idx, item in enumerate(candidates[:30], start=1):
+            cards.append(self._build_candidate_card(item, idx))
+
+        return {
+            "component": "VCard",
+            "props": {"class": "mb-4", "variant": "tonal"},
+            "content": [
+                {
+                    "component": "VCardTitle",
+                    "props": {"class": "pb-1"},
+                    "text": "最新候选评分榜"
+                },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "pt-0 text-caption"},
+                    "text": "按候选评分从高到低排列；第 1 名是当前最优先删除。评分 = 空间收益分 + 时间陈旧分 + 低活跃分 + TMDB评分修正分。"
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "grid gap-3 grid-info-card p-4"},
+                    "content": cards,
+                }
+            ]
+        }
+
+    def _build_candidate_card(self, item: Dict[str, Any], rank: int) -> Dict[str, Any]:
+        poster = item.get("poster") or "/assets/no-image-CweBJ8Ee.jpeg"
+        name = item.get("tmdb_title") or item.get("name") or "未知媒体"
+        title = str(name)
+        if len(title) > 18:
+            title = title[:18] + "..."
+        score = float(item.get("score") or 0)
+        tmdb_rating = item.get("tmdb_rating")
+        tmdb_vote_count = item.get("tmdb_vote_count")
+        tmdb_modifier = float(item.get("tmdb_modifier") or 0)
+        tmdb_reason = item.get("tmdb_reason") or "TMDB评分未参与"
+        tmdb_id = item.get("tmdb_id")
+        href = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
+        rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
+
+        details = [
+            f"评分: {score:.2f}（{rank_text}）",
+            f"大小: {float(item.get('size_gb') or 0):.2f}GB｜陈旧: {item.get('age_days') or 0}天",
+            f"空间分: {float(item.get('space_score') or 0):.2f}｜时间分: {float(item.get('age_score') or 0):.2f}｜低活跃分: {float(item.get('inactive_score') or 0):.2f}",
+            f"TMDB: {tmdb_rating if tmdb_rating is not None else '未参与'} / 人数: {tmdb_vote_count if tmdb_vote_count is not None else '-'} / 修正: {tmdb_modifier:+.2f}",
+            f"说明: {tmdb_reason}",
+        ]
+
+        return {
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "overflow-hidden"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex justify-space-start flex-nowrap flex-row"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "content": [
+                                {
+                                    "component": "VImg",
+                                    "props": {
+                                        "src": poster,
+                                        "height": 150,
+                                        "width": 100,
+                                        "aspect-ratio": "2/3",
+                                        "class": "object-cover shadow ring-gray-500",
+                                        "cover": True,
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "component": "div",
+                            "props": {"class": "min-w-0"},
+                            "content": [
+                                {
+                                    "component": "VCardTitle",
+                                    "props": {"class": "py-1 pl-2 pr-4 text-lg whitespace-nowrap"},
+                                    "content": [{"component": "a", "props": {"href": href, "target": "_blank"}, "text": title}],
+                                },
+                                *[
+                                    {"component": "VCardText", "props": {"class": "pa-0 px-2 text-caption"}, "text": text}
+                                    for text in details
+                                ],
+                                {"component": "VCardText", "props": {"class": "pa-0 px-2 text-caption text-medium-emphasis"}, "text": item.get("path") or ""},
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
 
     def _schedule_next(self, initial: bool = False):
         if not self._enabled:
@@ -444,8 +554,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 selected_for_record = selected
                 summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
             
-            self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary, 
-                             scan_paths, diagnosis=diagnosis)
+            self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary,
+                             scan_paths, diagnosis=diagnosis, all_candidates=candidates)
             
             # 只有真实删除成功才发送通知（v2.5+）
             if not self._dry_run and deleted:
@@ -512,8 +622,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
-                     diagnosis: Optional[Dict[str, Any]] = None):
+                     diagnosis: Optional[Dict[str, Any]] = None,
+                     all_candidates: Optional[List[Dict[str, Any]]] = None):
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
+        scored_candidates = sorted(all_candidates or selected or [], key=lambda x: float(x.get("score") or 0), reverse=True)
         record = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "monitor_path": monitor_path.as_posix(),
@@ -529,22 +641,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "scan_paths_text": ", ".join(scan_paths or []),
             "diagnosis": diagnosis or {},
             "diagnosis_text": DiskSpaceNotifier(self).diagnosis_text(diagnosis),
+            "all_candidate_count": len(scored_candidates),
+            "all_candidates": [self._serialize_candidate(x) for x in scored_candidates[:100]],
             "candidates": [
-                {
-                    "path": x.get("path"),
-                    "name": x.get("name"),
-                    "size_gb": round(float(x.get("size_gb") or 0), 2),
-                    "age_days": x.get("age_days"),
-                    "score": round(float(x.get("score") or 0), 2),
-                    "space_score": round(float(x.get("space_score") or 0), 2),
-                    "age_score": round(float(x.get("age_score") or 0), 2),
-                    "inactive_score": round(float(x.get("inactive_score") or 0), 2),
-                    "tmdb_modifier": round(float(x.get("tmdb_modifier") or 0), 2),
-                    "tmdb_rating": x.get("tmdb_rating"),
-                    "tmdb_vote_count": x.get("tmdb_vote_count"),
-                    "type": x.get("type"),
-                }
-                for x in selected[:50]
+                self._serialize_candidate(x) for x in selected[:50]
             ],
         }
         
@@ -559,3 +659,26 @@ class DiskSpaceAutoCleaner(_PluginBase):
         
         # 持久化配置
         self._persist_config()
+
+    @staticmethod
+    def _serialize_candidate(item: Dict[str, Any]) -> Dict[str, Any]:
+        """压缩保存候选评分数据，供页面展示最新候选榜。"""
+        return {
+            "path": item.get("path"),
+            "name": item.get("name"),
+            "size_gb": round(float(item.get("size_gb") or 0), 2),
+            "age_days": item.get("age_days"),
+            "score": round(float(item.get("score") or 0), 2),
+            "space_score": round(float(item.get("space_score") or 0), 2),
+            "age_score": round(float(item.get("age_score") or 0), 2),
+            "inactive_score": round(float(item.get("inactive_score") or 0), 2),
+            "tmdb_modifier": round(float(item.get("tmdb_modifier") or 0), 2),
+            "tmdb_rating": item.get("tmdb_rating"),
+            "tmdb_weighted_rating": item.get("tmdb_weighted_rating"),
+            "tmdb_vote_count": item.get("tmdb_vote_count"),
+            "tmdb_title": item.get("tmdb_title"),
+            "tmdb_id": item.get("tmdb_id"),
+            "poster": item.get("poster"),
+            "tmdb_reason": item.get("tmdb_reason"),
+            "type": item.get("type"),
+        }

@@ -484,6 +484,7 @@ class DiskSpaceUtils:
                         "modifier": round(modifier, 2),
                         "tmdb_id": tmdb_id,
                         "title": tmdb_info.get("title") or tmdb_info.get("name") or title,
+                        "poster": DiskSpaceUtils.build_tmdb_poster_url(tmdb_info.get("poster_path")),
                         "vote_average": vote_average,
                         "vote_count": vote_count,
                         "weighted_rating": round(weighted_rating, 2),
@@ -497,6 +498,18 @@ class DiskSpaceUtils:
         except Exception as e:
             logger.warning(f"TMDB 评分查询失败: {path.name} - {e}")
             return {"used": False, "modifier": 0.0, "reason": f"TMDB 评分查询异常：{e}"}
+
+    @staticmethod
+    def build_tmdb_poster_url(poster_path: Any, size: str = "w500") -> Optional[str]:
+        """将 TMDB poster_path 转成可直接显示的海报 URL。"""
+        path = str(poster_path or "").strip()
+        if not path:
+            return None
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"https://image.tmdb.org/t/p/{size}{path}"
 
     @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:
