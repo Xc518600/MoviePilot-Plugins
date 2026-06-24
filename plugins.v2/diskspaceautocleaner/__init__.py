@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.14"
+    plugin_version = "3.2.15"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -372,7 +372,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             }
 
         cards = []
-        for idx, item in enumerate(candidates[:30], start=1):
+        for idx, item in enumerate(candidates[:5], start=1):
             cards.append(self._build_candidate_card(item, idx))
 
         return {
