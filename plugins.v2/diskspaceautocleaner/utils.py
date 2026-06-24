@@ -119,7 +119,10 @@ class DiskSpaceUtils:
             if DiskSpaceUtils.is_series_folder(path):
                 return True
             path_lower = path.as_posix().lower()
-            return any(k in path_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"])
+            name_lower = path.name.lower()
+            if any(k in path_lower for k in ["/电视剧/", "/电视/", "/tv/", "/series/", "/drama/"]):
+                return True
+            return bool(re.search(r"(第\s*\d+\s*季|season\s*\d+|\bs\d{1,2}\b)", name_lower, re.I))
         except Exception:
             return False
 
@@ -479,12 +482,15 @@ class DiskSpaceUtils:
                         + (bayes_m / (vote_count + bayes_m)) * neutral_rating
                     )
                     modifier = max(-max_modifier, min(max_modifier, (neutral_rating - weighted_rating) * rating_weight))
+                    poster = DiskSpaceUtils.get_media_poster(mediainfo, tmdb_info)
+                    tmdb_type = "tv" if mtype == MediaType.TV else "movie"
                     return {
                         "used": True,
                         "modifier": round(modifier, 2),
                         "tmdb_id": tmdb_id,
+                        "tmdb_type": tmdb_type,
                         "title": tmdb_info.get("title") or tmdb_info.get("name") or title,
-                        "poster": DiskSpaceUtils.build_tmdb_poster_url(tmdb_info.get("poster_path")),
+                        "poster": poster,
                         "vote_average": vote_average,
                         "vote_count": vote_count,
                         "weighted_rating": round(weighted_rating, 2),
@@ -510,6 +516,24 @@ class DiskSpaceUtils:
         if not path.startswith("/"):
             path = f"/{path}"
         return f"https://image.tmdb.org/t/p/{size}{path}"
+
+    @staticmethod
+    def get_media_poster(mediainfo: Any = None, tmdb_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """优先从 MoviePilot 识别信息取海报，失败再从 TMDB poster_path 拼接。"""
+        try:
+            if mediainfo and hasattr(mediainfo, "get_poster_image"):
+                poster = mediainfo.get_poster_image()
+                if poster:
+                    return poster
+        except Exception:
+            pass
+
+        tmdb_info = tmdb_info or {}
+        for key in ("poster_path", "poster", "cover", "image"):
+            poster = tmdb_info.get(key)
+            if poster:
+                return DiskSpaceUtils.build_tmdb_poster_url(poster)
+        return None
 
     @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:

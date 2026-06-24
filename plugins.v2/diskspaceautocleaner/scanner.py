@@ -213,6 +213,7 @@ class DiskSpaceScanner:
                     tmdb_weighted_rating = None
                     tmdb_title = None
                     tmdb_id = None
+                    tmdb_type = None
                     poster = None
                     tmdb_reason = "未获取到 TMDB 评分"
                     if tmdb_rating:
@@ -221,6 +222,7 @@ class DiskSpaceScanner:
                         tmdb_weighted_rating = tmdb_rating.get("weighted_rating")
                         tmdb_title = tmdb_rating.get("title")
                         tmdb_id = tmdb_rating.get("tmdb_id")
+                        tmdb_type = tmdb_rating.get("tmdb_type")
                         poster = tmdb_rating.get("poster")
                         tmdb_modifier = float(tmdb_rating.get("modifier") or 0)
                         tmdb_reason = tmdb_rating.get("reason") or "TMDB 评分已参与排序"
@@ -253,6 +255,7 @@ class DiskSpaceScanner:
                         "tmdb_vote_count": tmdb_vote_count,
                         "tmdb_title": tmdb_title,
                         "tmdb_id": tmdb_id,
+                        "tmdb_type": tmdb_type,
                         "poster": poster,
                         "tmdb_reason": tmdb_reason,
                         "type": "目录" if child.is_dir() else "文件",

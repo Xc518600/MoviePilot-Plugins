@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.15"
+    plugin_version = "3.2.16"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -284,10 +284,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         }
                     ]
                 },
-                {
-                    "component": "VAlert",
-                    "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。"}
-                },
             ]
 
         rows = []
@@ -316,10 +312,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         return [
             {
-                "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "硬盘空间自动清理 v2.8：代码重构，拆分成4个模块，提高可读性和可维护性。"}
-            },
-            {
                 "component": "VCard",
                 "props": {"class": "mb-4"},
                 "content": [
@@ -337,10 +329,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         ]
                     }
                 ]
-            },
-            {
-                "component": "VAlert",
-                "props": {"type": "success", "variant": "tonal", "text": "执行结果将显示在下方表格中。最新候选评分榜按删除优先级排序，排第一的是当前最优先删除。"}
             },
             self._build_latest_candidates_panel(latest_candidates),
             {
@@ -409,7 +397,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
         tmdb_modifier = float(item.get("tmdb_modifier") or 0)
         tmdb_reason = item.get("tmdb_reason") or "TMDB评分未参与"
         tmdb_id = item.get("tmdb_id")
-        href = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
+        tmdb_type = item.get("tmdb_type") or "movie"
+        href = f"https://www.themoviedb.org/{tmdb_type}/{tmdb_id}" if tmdb_id else "#"
         rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
 
         details = [
@@ -678,6 +667,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "tmdb_vote_count": item.get("tmdb_vote_count"),
             "tmdb_title": item.get("tmdb_title"),
             "tmdb_id": item.get("tmdb_id"),
+            "tmdb_type": item.get("tmdb_type"),
             "poster": item.get("poster"),
             "tmdb_reason": item.get("tmdb_reason"),
             "type": item.get("type"),
