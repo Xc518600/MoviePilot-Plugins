@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.log import logger
+from app.schemas import MediaType
 
 
 class DiskSpaceUtils:
@@ -304,24 +305,49 @@ class DiskSpaceUtils:
         return keys
 
     @staticmethod
-    def _extract_expected_episode_count(text: str) -> Optional[int]:
-        """从目录名/NFO 中提取“全 N 集/共 N 集/N 集全”等总集数。"""
-        patterns = [
-            r"(?:全|共|全集|完结|已完结)\s*(\d{1,4})\s*(?:集|话|話|episodes?|eps?)",
-            r"(\d{1,4})\s*(?:集|话|話)\s*(?:全|完结|已完结)",
-            r"(?:totalepisodes|episodecount|episodes?)\s*[:：>\s]+(\d{1,4})",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            try:
-                value = int(match.group(1))
-                if 1 <= value <= 2000:
-                    return value
-            except Exception:
-                continue
-        return None
+    def get_tmdb_episode_count(path: Path, media_chain=None) -> Tuple[Optional[int], Optional[str]]:
+        """
+        通过 MoviePilot 的 MediaChain 从 TMDB 获取电视剧总集数和完结状态。
+        
+        返回: (总集数, 完结状态)
+        """
+        if media_chain is None:
+            return None, None
+            
+        try:
+            # 从路径中提取标题
+            title = DiskSpaceUtils.extract_movie_title(path)
+            if not title:
+                return None, None
+            
+            # 通过 MediaChain 查询 TMDB
+            meta_info = media_chain.recognize_media(title)
+            if not meta_info:
+                return None, None
+            
+            # 获取 TMDB 详细信息
+            media_id = meta_info.tmdb_id
+            if not media_id:
+                return None, None
+            
+            # 获取媒体信息
+            media_detail = media_chain.get_tmdb_info(
+                tmdb_id=media_id,
+                mtype=MediaType.TV
+            )
+            
+            if not media_detail:
+                return None, None
+            
+            # 返回总集数和状态
+            total_episodes = media_detail.get("total_episodes") or media_detail.get("episode_count")
+            status = media_detail.get("status")
+            
+            return total_episodes, status
+            
+        except Exception as e:
+            logger.warning(f"TMDB 查询失败: {path} - {str(e)}")
+            return None, None
 
     @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:
@@ -341,47 +367,40 @@ class DiskSpaceUtils:
         return count
 
     @staticmethod
-    def is_completed_complete_series(path: Path, max_scan_items: int = 10000) -> Tuple[bool, str]:
+    def is_completed_complete_series(path: Path, max_scan_items: int = 10000, media_chain=None) -> Tuple[bool, str]:
         """
-        电视剧删除保护：必须能明确证明“已完结”且“本地集数完整”才允许删除。
-
-        智能判断顺序：
-        - 优先解析 MoviePilot/Emby/Jellyfin/Kodi 常见 NFO/TMDB 风格元数据；
-        - 再回退到路径名/NFO 文本中的“已完结/全 N 集”等标记；
-        - 本地完整性优先按唯一集编号统计，无法识别编号时再按视频文件数量兜底；
-        任一条件不满足就返回 False，避免误删未完结电视剧。
+        电视剧删除保护：通过 TMDB 查询确认“已完结”且“本地集数完整”才允许删除。
         """
         if not DiskSpaceUtils.is_series_candidate(path):
             return True, "非电视剧候选"
 
-        metadata_text = DiskSpaceUtils._read_series_metadata_text(path)
-        metadata_lower = metadata_text.lower()
-        xml_meta = DiskSpaceUtils._extract_xml_metadata(path, max_files=max(50, min(max_scan_items, 300)))
-        status_values = [str(x).strip().lower() for x in xml_meta.get("status_values") or [] if str(x).strip()]
-
-        combined_status_text = "\n".join([metadata_lower, *status_values])
-        if any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.ONGOING_SERIES_MARKERS):
-            return False, "电视剧包含未完结/连载标记"
-
-        has_completed_marker = any(marker.lower() in combined_status_text for marker in DiskSpaceUtils.COMPLETED_SERIES_MARKERS)
-        if not has_completed_marker:
-            return False, "电视剧未发现明确完结标记"
-
-        episode_counts = [int(x) for x in (xml_meta.get("episode_counts") or []) if isinstance(x, int) and x > 0]
-        expected_count = max(episode_counts) if episode_counts else DiskSpaceUtils._extract_expected_episode_count(metadata_text)
+        # 从 TMDB 获取总集数和完结状态
+        expected_count, tmdb_status = DiskSpaceUtils.get_tmdb_episode_count(path, media_chain)
+        
         if not expected_count:
-            return False, "电视剧未发现总集数，无法确认完整"
-
+            return False, "无法从 TMDB 获取电视剧总集数"
+        
+        # 检查 TMDB 状态是否为已完结
+        if tmdb_status:
+            status_lower = str(tmdb_status).lower()
+            if status_lower in ["ended", "completed", "canceled"]:
+                # 已完结，继续检查本地集数
+                pass
+            elif status_lower in ["returning series", "planned", "in production", "ongoing"]:
+                return False, f"电视剧未完结（TMDB状态={tmdb_status}）"
+        
+        # 统计本地集数
         local_episode_keys = DiskSpaceUtils.collect_local_episode_keys(path, max_items=max_scan_items)
+        xml_meta = DiskSpaceUtils._extract_xml_metadata(path, max_files=max(50, min(max_scan_items, 300)))
         xml_episode_keys = xml_meta.get("episode_keys") or set()
         if xml_episode_keys:
             local_episode_keys.update(xml_episode_keys)
         local_count = len(local_episode_keys) if local_episode_keys else DiskSpaceUtils.count_video_files(path, max_items=max_scan_items)
+        
         if local_count < expected_count:
             return False, f"电视剧本地集数不完整：{local_count}/{expected_count}"
-
-        source = "NFO/TMDB元数据" if xml_meta.get("parsed_nfo_files") else "本地文本标记"
-        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}（来源={source}）"
+        
+        return True, f"电视剧已完结且本地集数完整：{local_count}/{expected_count}（来源=TMDB）"
 
     @staticmethod
     def detect_root_type(path: Path) -> str:

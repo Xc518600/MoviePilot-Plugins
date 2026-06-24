@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.chain.media import MediaChain
 from app.log import logger
 
 from .utils import DiskSpaceUtils
@@ -16,6 +17,7 @@ class DiskSpaceScanner:
     def __init__(self, plugin_instance):
         self._plugin = plugin_instance
         self._lock = threading.Lock()
+        self._media_chain = MediaChain()
     
     def build_candidates(self,
                         size_cache: Dict[str, int],
@@ -154,7 +156,7 @@ class DiskSpaceScanner:
 
                     if DiskSpaceUtils.is_series_candidate(child):
                         series_ok, series_reason = DiskSpaceUtils.is_completed_complete_series(
-                            child, max_scan_items=self._plugin._max_scan_items
+                            child, max_scan_items=self._plugin._max_scan_items, media_chain=self._media_chain
                         )
                         if not series_ok:
                             diagnosis["incomplete_series_skipped"] += 1
