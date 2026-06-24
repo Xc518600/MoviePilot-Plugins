@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.chain.media import MediaChain
 from app.log import logger
 
 from .utils import DiskSpaceUtils
@@ -14,6 +15,7 @@ class DiskSpaceDeleter:
     
     def __init__(self, plugin_instance):
         self._plugin = plugin_instance
+        self._media_chain = MediaChain()
     
     def path_size(self, path: Path, size_cache: Dict[str, int], 
                   size_cache_lock: 'threading.Lock') -> int:
@@ -80,7 +82,9 @@ class DiskSpaceDeleter:
 
                 if DiskSpaceUtils.is_series_candidate(path):
                     series_ok, series_reason = DiskSpaceUtils.is_completed_complete_series(
-                        path, max_scan_items=self._plugin._max_scan_items
+                        path,
+                        max_scan_items=self._plugin._max_scan_items,
+                        media_chain=self._media_chain,
                     )
                     if not series_ok:
                         msg = f"跳过未完结或未完整入库的电视剧：{path}，原因={series_reason}"
