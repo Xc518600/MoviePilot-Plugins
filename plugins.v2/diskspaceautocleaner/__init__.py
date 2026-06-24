@@ -20,7 +20,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.18"
+    plugin_version = "3.2.19"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -289,23 +289,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 },
             ]
 
-        rows = []
-        for idx, item in enumerate(history, start=1):
-            rows.append({
-                "component": "tr",
-                "content": [
-                    {"component": "td", "text": str(idx)},
-                    {"component": "td", "text": item.get("time", "")},
-                    {"component": "td", "text": item.get("monitor_path", "")},
-                    {"component": "td", "text": item.get("free_text", "")},
-                    {"component": "td", "text": item.get("scan_paths_text", "")},
-                    {"component": "td", "text": str(item.get("candidate_count", 0))},
-                    {"component": "td", "text": item.get("reclaim_text", "")},
-                    {"component": "td", "text": item.get("diagnosis_text", "")},
-                    {"component": "td", "text": item.get("summary", "")},
-                ]
-            })
-
         latest_candidates = []
         for item in history:
             candidates = item.get("all_candidates") or item.get("candidates") or []
@@ -315,24 +298,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         return [
             self._build_latest_candidates_panel(latest_candidates),
-            {
-                "component": "VTable",
-                "props": {"hover": True, "density": "compact", "fixed-header": True, "style": {"max-height": "620px", "overflow-y": "auto"}},
-                "content": [
-                    {"component": "thead", "content": [{"component": "tr", "content": [
-                        {"component": "th", "text": "#"},
-                        {"component": "th", "text": "时间"},
-                        {"component": "th", "text": "监控路径"},
-                        {"component": "th", "text": "剩余空间"},
-                        {"component": "th", "text": "实际扫描"},
-                        {"component": "th", "text": "候选"},
-                        {"component": "th", "text": "预计释放"},
-                        {"component": "th", "text": "诊断"},
-                        {"component": "th", "text": "摘要"},
-                    ]}]},
-                    {"component": "tbody", "content": rows},
-                ]
-            }
         ]
 
     def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
