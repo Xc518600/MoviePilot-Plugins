@@ -2,18 +2,13 @@ import os
 import shutil
 import threading
 import time
-import base64
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, unquote
 
-from fastapi import Response
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.chain.media import MediaChain
-from app.core.config import settings
-from app.utils.http import RequestUtils
 
 from .utils import DiskSpaceUtils
 from .scanner import DiskSpaceScanner
@@ -25,7 +20,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.20"
+    plugin_version = "3.2.21"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -118,13 +113,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "summary": "立即运行空间检查",
                 "description": "手动触发硬盘空间检查并生成清理建议，不受定时检查间隔限制。",
                 "methods": ["POST"]
-            },
-            {
-                "path": "/poster",
-                "endpoint": self.poster_proxy,
-                "summary": "候选海报代理",
-                "description": "代理候选榜海报，避免前端直连 TMDB 图片域名导致空白。",
-                "methods": ["GET"]
             }
         ]
 
@@ -137,36 +125,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
         except Exception as e:
             logger.error(f"硬盘空间自动清理 API 立即运行失败：{e}", exc_info=True)
             return {"success": False, "message": f"立即运行失败：{e}"}
-
-    def poster_proxy(self, url: str = "", apikey: str = ""):
-        """插件 API：代理海报图片，避免浏览器无法访问外部图片域名。"""
-        try:
-            if apikey and apikey != settings.API_TOKEN:
-                return Response(status_code=403, content=b"Forbidden", media_type="text/plain")
-            poster_url = unquote(str(url or "").strip())
-            if not poster_url.startswith(("http://", "https://")):
-                return self._blank_poster_response()
-
-            res = RequestUtils(timeout=10).get_res(
-                poster_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Referer": "https://www.themoviedb.org/",
-                }
-            )
-            if not res or res.status_code >= 400 or not res.content:
-                logger.warning(f"候选海报代理失败：status={getattr(res, 'status_code', None)}, url={poster_url}")
-                return self._blank_poster_response()
-            content_type = res.headers.get("Content-Type") or "image/jpeg"
-            return Response(content=res.content, media_type=content_type)
-        except Exception as e:
-            logger.warning(f"候选海报代理异常：{e}")
-            return self._blank_poster_response()
-
-    def _blank_poster_response(self):
-        data = self._blank_poster.split(",", 1)[-1]
-        return Response(content=base64.b64decode(data), media_type="image/png")
 
     def stop_service(self):
         with self._lock:
@@ -378,7 +336,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def _build_candidate_card(self, item: Dict[str, Any], rank: int) -> Dict[str, Any]:
         poster = self._resolve_candidate_poster(item)
-        poster_src = self._build_poster_proxy_url(poster) if poster else self._blank_poster
+        poster_src = poster or self._blank_poster
         name = item.get("tmdb_title") or item.get("name") or "未知媒体"
         title = str(name)
         if len(title) > 18:
@@ -447,20 +405,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 }
             ]
         }
-
-    @staticmethod
-    def _build_poster_proxy_url(poster: Optional[str]) -> Optional[str]:
-        """把外部海报 URL 包装成本插件代理 URL。"""
-        if not poster:
-            return None
-        if str(poster).startswith("data:image/"):
-            return poster
-        try:
-            return settings.MP_DOMAIN(
-                f"/api/v1/plugin/DiskSpaceAutoCleaner/poster?url={quote(str(poster), safe='')}&apikey={settings.API_TOKEN}"
-            )
-        except Exception:
-            return f"/api/v1/plugin/DiskSpaceAutoCleaner/poster?url={quote(str(poster), safe='')}&apikey={settings.API_TOKEN}"
 
     def _resolve_candidate_poster(self, item: Dict[str, Any]) -> Optional[str]:
         """页面展示时兜底补海报，兼容旧历史里未保存 poster 的候选。"""

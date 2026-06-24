@@ -463,15 +463,29 @@ class DiskSpaceUtils:
                     if not tmdb_info:
                         continue
 
+                    poster = DiskSpaceUtils.get_media_poster(mediainfo, tmdb_info)
+                    tmdb_type = "tv" if mtype == MediaType.TV else "movie"
+                    media_title = tmdb_info.get("title") or tmdb_info.get("name") or title
                     vote_average = DiskSpaceUtils._safe_float(tmdb_info.get("vote_average"))
                     vote_count = DiskSpaceUtils._safe_vote_count(tmdb_info.get("vote_count"))
                     if vote_average is None:
-                        return {"used": False, "modifier": 0.0, "tmdb_id": tmdb_id, "reason": "TMDB 缺少 vote_average"}
+                        return {
+                            "used": False,
+                            "modifier": 0.0,
+                            "tmdb_id": tmdb_id,
+                            "tmdb_type": tmdb_type,
+                            "title": media_title,
+                            "poster": poster,
+                            "reason": "TMDB 缺少 vote_average",
+                        }
                     if vote_count < int(min_vote_count or 0):
                         return {
                             "used": False,
                             "modifier": 0.0,
                             "tmdb_id": tmdb_id,
+                            "tmdb_type": tmdb_type,
+                            "title": media_title,
+                            "poster": poster,
                             "vote_average": vote_average,
                             "vote_count": vote_count,
                             "reason": f"评分人数过少 vote_count={vote_count}，低于阈值 {min_vote_count}",
@@ -482,14 +496,12 @@ class DiskSpaceUtils:
                         + (bayes_m / (vote_count + bayes_m)) * neutral_rating
                     )
                     modifier = max(-max_modifier, min(max_modifier, (neutral_rating - weighted_rating) * rating_weight))
-                    poster = DiskSpaceUtils.get_media_poster(mediainfo, tmdb_info)
-                    tmdb_type = "tv" if mtype == MediaType.TV else "movie"
                     return {
                         "used": True,
                         "modifier": round(modifier, 2),
                         "tmdb_id": tmdb_id,
                         "tmdb_type": tmdb_type,
-                        "title": tmdb_info.get("title") or tmdb_info.get("name") or title,
+                        "title": media_title,
                         "poster": poster,
                         "vote_average": vote_average,
                         "vote_count": vote_count,
