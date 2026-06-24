@@ -131,6 +131,10 @@ class DiskSpaceNotifier:
             cache_total = cache_hits + cache_misses
             cache_rate = cache_hits / cache_total * 100 if cache_total > 0 else 0
             parts.append(f"缓存命中率{cache_rate:.1f}%")
+        if diagnosis.get('tmdb_rating_used') or diagnosis.get('tmdb_rating_ignored'):
+            parts.append(
+                f"TMDB评分参与{diagnosis.get('tmdb_rating_used', 0)}项/忽略{diagnosis.get('tmdb_rating_ignored', 0)}项"
+            )
         
         if diagnosis.get('limit_reached'):
             parts.append("已达扫描上限")

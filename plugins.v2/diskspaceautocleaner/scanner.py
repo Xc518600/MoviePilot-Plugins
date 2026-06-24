@@ -23,7 +23,8 @@ class DiskSpaceScanner:
                         size_cache: Dict[str, int],
                         size_cache_lock: threading.Lock,
                         monitor_path: Optional[Path] = None,
-                        scan_paths: Optional[List[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                        scan_paths: Optional[List[str]] = None,
+                        target_release_gb: float = 0) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """构建清理候选列表（使用多线程并行扫描）。"""
         media_paths = scan_paths if scan_paths is not None else self._media_paths_for_monitor(monitor_path)
         protect_dirs = [Path(p).as_posix().rstrip("/") for p in DiskSpaceUtils.lines(self._plugin._protect_dirs)]
@@ -46,6 +47,8 @@ class DiskSpaceScanner:
             "scan_time_seconds": 0,
             "cache_hits": 0,
             "cache_misses": 0,
+            "tmdb_rating_used": 0,
+            "tmdb_rating_ignored": 0,
         }
         now = time.time()
         recent_seconds = max(0, int(self._plugin._recent_days_protect or 0)) * 86400
@@ -64,7 +67,7 @@ class DiskSpaceScanner:
             future_to_root = {
                 executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
                                max_items, protect_dirs, protect_keywords,
-                               size_cache, size_cache_lock): root
+                               size_cache, size_cache_lock, target_release_gb): root
                 for root in media_paths
             }
             
@@ -86,6 +89,8 @@ class DiskSpaceScanner:
                         diagnosis["error_skipped"] += root_diagnosis.get("error_skipped", 0)
                         diagnosis["cache_hits"] += root_diagnosis.get("cache_hits", 0)
                         diagnosis["cache_misses"] += root_diagnosis.get("cache_misses", 0)
+                        diagnosis["tmdb_rating_used"] += root_diagnosis.get("tmdb_rating_used", 0)
+                        diagnosis["tmdb_rating_ignored"] += root_diagnosis.get("tmdb_rating_ignored", 0)
                 except Exception as e:
                     with self._lock:
                         diagnosis["error_skipped"] += 1
@@ -109,7 +114,8 @@ class DiskSpaceScanner:
     
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
-                         size_cache: Dict[str, int], size_cache_lock: threading.Lock) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         size_cache: Dict[str, int], size_cache_lock: threading.Lock,
+                         target_release_gb: float = 0) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
         candidates: List[Dict[str, Any]] = []
@@ -124,6 +130,8 @@ class DiskSpaceScanner:
             "error_skipped": 0,
             "cache_hits": 0,
             "cache_misses": 0,
+            "tmdb_rating_used": 0,
+            "tmdb_rating_ignored": 0,
         }
         
         if not root.exists() or not root.is_dir():
@@ -198,9 +206,29 @@ class DiskSpaceScanner:
                     
                     age_days = max(0, int((now - stat.st_mtime) / 86400))
                     size_gb = size / 1024 ** 3
-                    
-                    base_score = age_days + size_gb * 2
-                    score = base_score
+                    tmdb_rating = self._get_tmdb_rating(child, stat.st_mtime)
+                    tmdb_modifier = 0.0
+                    tmdb_vote_average = None
+                    tmdb_vote_count = None
+                    tmdb_weighted_rating = None
+                    tmdb_reason = "未获取到 TMDB 评分"
+                    if tmdb_rating:
+                        tmdb_vote_average = tmdb_rating.get("vote_average")
+                        tmdb_vote_count = tmdb_rating.get("vote_count")
+                        tmdb_weighted_rating = tmdb_rating.get("weighted_rating")
+                        tmdb_modifier = float(tmdb_rating.get("modifier") or 0)
+                        tmdb_reason = tmdb_rating.get("reason") or "TMDB 评分已参与排序"
+                        if tmdb_rating.get("used"):
+                            diagnosis["tmdb_rating_used"] += 1
+                        else:
+                            diagnosis["tmdb_rating_ignored"] += 1
+                    else:
+                        diagnosis["tmdb_rating_ignored"] += 1
+
+                    score_detail = self._score_candidate(size_gb=size_gb, age_days=age_days,
+                                                         target_release_gb=target_release_gb,
+                                                         tmdb_modifier=tmdb_modifier)
+                    score = score_detail["score"]
                     
                     candidates.append({
                         "path": child.as_posix(),
@@ -210,10 +238,21 @@ class DiskSpaceScanner:
                         "age_days": age_days,
                         "mtime": stat.st_mtime,
                         "score": score,
+                        "space_score": score_detail["space_score"],
+                        "age_score": score_detail["age_score"],
+                        "inactive_score": score_detail["inactive_score"],
+                        "tmdb_modifier": tmdb_modifier,
+                        "tmdb_rating": tmdb_vote_average,
+                        "tmdb_weighted_rating": tmdb_weighted_rating,
+                        "tmdb_vote_count": tmdb_vote_count,
+                        "tmdb_reason": tmdb_reason,
                         "type": "目录" if child.is_dir() else "文件",
                     })
                     logger.info(
-                        f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，分值={score:.2f}"
+                        f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
+                        f"空间分={score_detail['space_score']:.2f}，时间分={score_detail['age_score']:.2f}，"
+                        f"低活跃分={score_detail['inactive_score']:.2f}，TMDB修正={tmdb_modifier:.2f}，"
+                        f"总分={score:.2f}，TMDB={tmdb_reason}"
                     )
                 except Exception as e:
                     diagnosis["error_skipped"] += 1
@@ -223,6 +262,62 @@ class DiskSpaceScanner:
             logger.error(f"扫描媒体目录失败 {root}: {e}", exc_info=True)
         
         return candidates, diagnosis
+
+    @staticmethod
+    def _age_bucket_score(days: int, max_score: float) -> float:
+        """按最终方案将陈旧天数映射为分数。"""
+        if days >= 180:
+            return max_score
+        if days >= 90:
+            return round(max_score * 22 / 30, 2)
+        if days >= 30:
+            return round(max_score * 15 / 30, 2)
+        if days >= 7:
+            return round(max_score * 8 / 30, 2)
+        return 0.0
+
+    def _score_candidate(self, size_gb: float, age_days: int,
+                         target_release_gb: float, tmdb_modifier: float = 0) -> Dict[str, float]:
+        """
+        计算候选删除优先级：空间收益分 + 时间陈旧分 + 低活跃分 + TMDB评分修正分。
+
+        当前插件没有可靠播放/访问记录来源，低活跃分默认不参与，避免把文件 mtime/atime
+        误当成真实播放活跃度。后续若接入媒体服务器播放记录，可在这里补充 inactive_score。
+        """
+        target = float(target_release_gb or 0)
+        if target <= 0:
+            target = max(float(size_gb or 0), 1.0)
+        space_score = min(40.0, max(0.0, float(size_gb or 0)) / target * 40.0)
+        age_score = self._age_bucket_score(int(age_days or 0), 30.0)
+        inactive_score = 0.0
+        score = space_score + age_score + inactive_score + float(tmdb_modifier or 0)
+        return {
+            "space_score": round(space_score, 2),
+            "age_score": round(age_score, 2),
+            "inactive_score": round(inactive_score, 2),
+            "score": round(score, 2),
+        }
+
+    def _get_tmdb_rating(self, path: Path, mtime: float) -> Optional[Dict[str, Any]]:
+        """获取 TMDB 评分，按路径和 mtime 缓存 30 天。"""
+        cache = getattr(self._plugin, "_tmdb_rating_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self._plugin, "_tmdb_rating_cache", cache)
+
+        key = f"{path.as_posix()}:{int(mtime or 0)}"
+        now = time.time()
+        cached = cache.get(key)
+        if isinstance(cached, dict) and now - float(cached.get("cache_time") or 0) < 30 * 86400:
+            value = cached.get("value")
+            return value if isinstance(value, dict) else None
+
+        value = DiskSpaceUtils.get_tmdb_rating(path, self._media_chain)
+        cache[key] = {"cache_time": now, "value": value}
+        if len(cache) > 1000:
+            for old_key, _ in sorted(cache.items(), key=lambda item: item[1].get("cache_time", 0))[:200]:
+                cache.pop(old_key, None)
+        return value
     
     def _iter_candidate_items(self, root: Path, depth: int):
         """智能扫描候选（使用迭代替代递归，避免递归深度限制）：

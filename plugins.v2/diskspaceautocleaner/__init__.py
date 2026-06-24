@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.11"
+    plugin_version = "3.2.12"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -44,6 +44,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history_limit = 50
     _history: List[Dict[str, Any]] = []
     _run_once = False
+    _tmdb_rating_cache: Dict[str, Dict[str, Any]] = {}
 
     _size_cache: Dict[str, int] = {}
     _size_cache_lock = threading.Lock()
@@ -419,13 +420,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 f"空间不足，开始扫描候选：监控路径={mpath}，扫描路径={', '.join(scan_paths) or '未配置'}，"
                 f"深度={self._candidate_depth}，最大条目={self._max_scan_items}，线程={self._scan_workers}"
             )
+            needed_gb = max(0, self._target_free_gb - free_gb)
             candidates, diagnosis = scanner.build_candidates(
                 monitor_path=mpath,
                 scan_paths=scan_paths,
                 size_cache=self._size_cache,
                 size_cache_lock=self._size_cache_lock,
+                target_release_gb=needed_gb,
             )
-            needed_gb = max(0, self._target_free_gb - free_gb)
             selected = self._select_candidates(candidates, needed_gb)
             logger.info(
                 f"空间不足：当前剩余 {free_gb:.1f}GB < 触发阈值 {self._min_free_gb}GB，"
@@ -533,6 +535,13 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "name": x.get("name"),
                     "size_gb": round(float(x.get("size_gb") or 0), 2),
                     "age_days": x.get("age_days"),
+                    "score": round(float(x.get("score") or 0), 2),
+                    "space_score": round(float(x.get("space_score") or 0), 2),
+                    "age_score": round(float(x.get("age_score") or 0), 2),
+                    "inactive_score": round(float(x.get("inactive_score") or 0), 2),
+                    "tmdb_modifier": round(float(x.get("tmdb_modifier") or 0), 2),
+                    "tmdb_rating": x.get("tmdb_rating"),
+                    "tmdb_vote_count": x.get("tmdb_vote_count"),
                     "type": x.get("type"),
                 }
                 for x in selected[:50]

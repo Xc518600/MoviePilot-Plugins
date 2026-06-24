@@ -392,6 +392,113 @@ class DiskSpaceUtils:
             return None, None
 
     @staticmethod
+    def _extract_media_type(path: Path):
+        """从路径粗略判断媒体类型，优先区分电影/电视剧，判断不出时先按电影识别。"""
+        try:
+            if DiskSpaceUtils.is_series_candidate(path):
+                return MediaType.TV
+        except Exception:
+            pass
+        return MediaType.MOVIE
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_vote_count(value: Any) -> int:
+        """安全解析 TMDB vote_count；评分人数可能远大于普通集数上限。"""
+        try:
+            if value is None or value == "":
+                return 0
+            return max(0, int(float(str(value).strip())))
+        except Exception:
+            match = re.search(r"\d+", str(value or ""))
+            return int(match.group(0)) if match else 0
+
+    @staticmethod
+    def get_tmdb_rating(path: Path, media_chain=None, min_vote_count: int = 50,
+                        neutral_rating: float = 6.5, max_modifier: float = 20.0,
+                        rating_weight: float = 6.0, bayes_m: int = 100) -> Optional[Dict[str, Any]]:
+        """
+        获取 TMDB 评分并转换为删除优先级修正分。
+
+        最终方案：TMDB 只作为软排序因子，低评分加分、高评分减分；评分人数不足、匹配失败、
+        字段缺失时不加不减。用户保护分/风险惩罚分/可恢复性分均不参与。
+        """
+        if media_chain is None:
+            return None
+
+        try:
+            titles = DiskSpaceUtils.build_tmdb_titles(path)
+            if not titles:
+                return {"used": False, "modifier": 0.0, "reason": "无法提取标题"}
+
+            preferred_type = DiskSpaceUtils._extract_media_type(path)
+            media_types = [preferred_type]
+            fallback_type = MediaType.MOVIE if preferred_type == MediaType.TV else MediaType.TV
+            media_types.append(fallback_type)
+
+            for mtype in media_types:
+                for title in titles:
+                    meta_info = MetaInfo(title)
+                    meta_info.type = mtype
+                    mediainfo = media_chain.recognize_media(meta=meta_info)
+                    if not mediainfo:
+                        continue
+
+                    tmdb_id = getattr(mediainfo, "tmdb_id", None)
+                    if not tmdb_id:
+                        continue
+
+                    tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=mtype)
+                    if not tmdb_info:
+                        continue
+
+                    vote_average = DiskSpaceUtils._safe_float(tmdb_info.get("vote_average"))
+                    vote_count = DiskSpaceUtils._safe_vote_count(tmdb_info.get("vote_count"))
+                    if vote_average is None:
+                        return {"used": False, "modifier": 0.0, "tmdb_id": tmdb_id, "reason": "TMDB 缺少 vote_average"}
+                    if vote_count < int(min_vote_count or 0):
+                        return {
+                            "used": False,
+                            "modifier": 0.0,
+                            "tmdb_id": tmdb_id,
+                            "vote_average": vote_average,
+                            "vote_count": vote_count,
+                            "reason": f"评分人数过少 vote_count={vote_count}，低于阈值 {min_vote_count}",
+                        }
+
+                    weighted_rating = (
+                        (vote_count / (vote_count + bayes_m)) * vote_average
+                        + (bayes_m / (vote_count + bayes_m)) * neutral_rating
+                    )
+                    modifier = max(-max_modifier, min(max_modifier, (neutral_rating - weighted_rating) * rating_weight))
+                    return {
+                        "used": True,
+                        "modifier": round(modifier, 2),
+                        "tmdb_id": tmdb_id,
+                        "title": tmdb_info.get("title") or tmdb_info.get("name") or title,
+                        "vote_average": vote_average,
+                        "vote_count": vote_count,
+                        "weighted_rating": round(weighted_rating, 2),
+                        "reason": (
+                            f"评分={vote_average:.1f}，人数={vote_count}，"
+                            f"加权={weighted_rating:.2f}，修正={modifier:+.2f}"
+                        ),
+                    }
+
+            return {"used": False, "modifier": 0.0, "reason": "未匹配到可靠 TMDB 媒体"}
+        except Exception as e:
+            logger.warning(f"TMDB 评分查询失败: {path.name} - {e}")
+            return {"used": False, "modifier": 0.0, "reason": f"TMDB 评分查询异常：{e}"}
+
+    @staticmethod
     def count_video_files(path: Path, max_items: int = 10000) -> int:
         """统计候选目录下的视频文件数量，超过 max_items 时提前停止。"""
         count = 0
