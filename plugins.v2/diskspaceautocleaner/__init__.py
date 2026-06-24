@@ -19,7 +19,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.16"
+    plugin_version = "3.2.17"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -311,25 +311,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 break
 
         return [
-            {
-                "component": "VCard",
-                "props": {"class": "mb-4"},
-                "content": [
-                    {
-                        "component": "VCardText",
-                        "content": [
-                            {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查并生成清理建议，不受定时检查间隔限制。"}
-                        ],
-                    },
-                    {
-                        "component": "VCardActions",
-                        "props": {"class": "justify-end"},
-                        "content": [
-                            {"component": "VBtn", "props": {"text": "立即运行检查", "color": "primary", "variant": "outlined", "action": "plugin_run_now", "loading": False}}
-                        ]
-                    }
-                ]
-            },
             self._build_latest_candidates_panel(latest_candidates),
             {
                 "component": "VTable",
