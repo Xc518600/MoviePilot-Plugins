@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.chain.media import MediaChain
-from app.core.metainfo import MetaInfoPath
+from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.schemas import MediaType
 
@@ -317,34 +317,53 @@ class DiskSpaceUtils:
             return None, None
             
         try:
-            # 使用 MetaInfoPath 解析路径
-            from app.core.metainfo import MetaInfoPath
-            meta_info = MetaInfoPath(path)
-            if not meta_info:
+            title = DiskSpaceUtils.extract_movie_title(path)
+            if not title:
+                logger.warning(f"TMDB 查询失败: {path.name} - 无法从目录名提取标题")
                 return None, None
-            
+
+            meta_info = MetaInfo(title)
             # 设置为电视剧类型
             meta_info.type = MediaType.TV
+            logger.info(f"TMDB 查询开始: path={path.name}, title={title}, type={meta_info.type}")
             
             # 通过 MediaChain 识别媒体信息
             mediainfo = media_chain.recognize_media(meta=meta_info)
             if not mediainfo:
+                logger.warning(f"TMDB 查询失败: {path.name} - recognize_media 未识别到媒体信息, title={title}")
                 return None, None
             
             # 获取 TMDB ID
             tmdb_id = mediainfo.tmdb_id
             if not tmdb_id:
+                logger.warning(
+                    f"TMDB 查询失败: {path.name} - recognize_media 未返回 tmdb_id, "
+                    f"title={title}, mediainfo_title={getattr(mediainfo, 'title', None)}, year={getattr(mediainfo, 'year', None)}"
+                )
                 return None, None
             
             # 获取 TMDB 详细信息
-            tmdb_info = media_chain.tmdb_info(tmdb_id=tmdb_id, mtype=MediaType.TV)
+            tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=MediaType.TV)
             
             if not tmdb_info:
+                logger.warning(f"TMDB 查询失败: {path.name} - tmdb_info 返回空, tmdb_id={tmdb_id}, title={title}")
                 return None, None
             
             # 返回总集数和状态
             total_episodes = tmdb_info.get("number_of_episodes") or tmdb_info.get("total_episodes") or tmdb_info.get("episode_count")
             status = tmdb_info.get("status")
+
+            if not total_episodes:
+                logger.warning(
+                    f"TMDB 查询失败: {path.name} - TMDB 详情缺少总集数字段, "
+                    f"tmdb_id={tmdb_id}, keys={list(tmdb_info.keys())[:20]}"
+                )
+                return None, status
+
+            logger.info(
+                f"TMDB 查询成功: path={path.name}, title={title}, tmdb_id={tmdb_id}, "
+                f"total_episodes={total_episodes}, status={status}"
+            )
             
             return total_episodes, status
             
