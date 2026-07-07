@@ -21,7 +21,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.25"
+    plugin_version = "3.2.26"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -112,6 +112,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         return []
 
+    @staticmethod
+    def _service_items(services: Dict[str, Any]) -> List[Dict[str, str]]:
+        """媒体服务字典转 VSelect items。"""
+        items: List[Dict[str, str]] = [{"title": "未选择", "value": ""}]
+        for name, conf in (services or {}).items():
+            service_type = getattr(conf, "type", "") or ""
+            title = f"{name} ({service_type})" if service_type else name
+            items.append({"title": title, "value": name})
+        return items
+
     def get_api(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -143,6 +153,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 self._timer = None
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        mediaserver_items = self._service_items(MediaServerHelper().get_configs())
+        default_media_server = self._media_server if any(item.get("value") == self._media_server for item in mediaserver_items) else ""
         return [
             {
                 "component": "VForm",
@@ -193,7 +205,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "media_server", "label": "媒体服务器名称", "placeholder": "Emby / Jellyfin / Plex", "hint": "填写 MoviePilot 里已配置的媒体服务器名称；用于正在播放保护"}}]
+                                "content": [{"component": "VSelect", "props": {"model": "media_server", "label": "媒体服务器", "items": mediaserver_items, "hint": "直接选择 MoviePilot 已配置的媒体服务器；未选择则不启用播放保护/最近播放降权", "persistent-hint": True}}]
                             },
                             {
                                 "component": "VCol",
@@ -279,7 +291,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "history_limit": self._history_limit,
             "max_delete_gb": self._max_delete_gb,
             "history": self._history,
-            "media_server": self._media_server,
+            "media_server": default_media_server,
             "active_play_protect": self._active_play_protect,
             "recent_play_days": self._recent_play_days,
             "sources": "immediate",
