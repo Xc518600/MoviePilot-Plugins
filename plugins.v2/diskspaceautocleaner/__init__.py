@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
+from app.helper.mediaserver import MediaServerHelper
 from app.chain.media import MediaChain
 
 from .utils import DiskSpaceUtils
@@ -20,7 +21,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.23"
+    plugin_version = "3.2.24"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -44,6 +45,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _protect_keywords = ""
     _history_limit = 50
     _history: List[Dict[str, Any]] = []
+    _media_server = ""
+    _active_play_protect = True
     _run_once = False
     _tmdb_rating_cache: Dict[str, Dict[str, Any]] = {}
     _poster_cache: Dict[str, Optional[str]] = {}
@@ -78,6 +81,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
             self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
+            self._media_server = config.get("media_server") or ""
+            self._active_play_protect = DiskSpaceUtils.to_bool(config.get("active_play_protect"), True)
 
         self.stop_service()
         if self._run_once:
@@ -165,6 +170,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "active_play_protect", "label": "正在播放保护", "hint": "启用后，当前正在 Emby/Jellyfin/Plex 播放的媒体不会进入删除候选"}}]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控硬盘/挂载路径", "rows": 3, "placeholder": "/media\n/硬盘1", "hint": "用于检查剩余空间，每行一个路径"}}]
                             },
@@ -177,6 +187,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{"component": "VTextarea", "props": {"model": "path_mappings", "label": "硬盘路径到媒体库路径映射", "rows": 4, "placeholder": "/硬盘5=>/link5\n/vol5=>/link5", "hint": "当某个监控硬盘空间不足时，只扫描它对应的媒体库存放路径。格式：监控路径=>媒体库路径，每行一个。例：硬盘5 对应 link5"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "media_server", "label": "媒体服务器名称", "placeholder": "Emby / Jellyfin / Plex", "hint": "填写 MoviePilot 里已配置的媒体服务器名称；用于正在播放保护"}}]
                             },
                             {
                                 "component": "VCol",
@@ -257,6 +272,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "history_limit": self._history_limit,
             "max_delete_gb": self._max_delete_gb,
             "history": self._history,
+            "media_server": self._media_server,
+            "active_play_protect": self._active_play_protect,
             "sources": "immediate",
         }
 
@@ -351,10 +368,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
         href = f"https://www.themoviedb.org/{tmdb_type}/{tmdb_id}" if tmdb_id else "#"
         rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
 
+        activity_reason = item.get("activity_reason") or "未命中播放保护"
         details = [
             f"评分: {score:.2f}（{rank_text}）",
             f"大小: {float(item.get('size_gb') or 0):.2f}GB｜陈旧: {item.get('age_days') or 0}天",
             f"空间分: {float(item.get('space_score') or 0):.2f}｜时间分: {float(item.get('age_score') or 0):.2f}｜低活跃分: {float(item.get('inactive_score') or 0):.2f}",
+            f"活跃度: {activity_reason}",
             f"TMDB: {tmdb_rating if tmdb_rating is not None else '未参与'} / 人数: {tmdb_vote_count if tmdb_vote_count is not None else '-'} / 修正: {tmdb_modifier:+.2f}",
             f"说明: {tmdb_reason}",
         ]
@@ -428,6 +447,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         self._poster_cache[key] = poster
         return poster
+
+    def _get_media_server_service(self, name: str):
+        """获取 MoviePilot 已配置的媒体服务器服务实例。"""
+        try:
+            return MediaServerHelper().get_service(name=name)
+        except Exception as e:
+            logger.warning(f"获取媒体服务器服务失败：{name} - {e}")
+            return None
 
     def _schedule_next(self, initial: bool = False):
         if not self._enabled:
@@ -646,4 +673,5 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "poster": item.get("poster"),
             "tmdb_reason": item.get("tmdb_reason"),
             "type": item.get("type"),
+            "activity_reason": item.get("activity_reason"),
         }

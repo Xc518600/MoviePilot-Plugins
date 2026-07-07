@@ -689,3 +689,26 @@ class DiskSpaceUtils:
         name = re.sub(r'[\s\-_.]+$', '', name)
         name = re.sub(r'\s{2,}', ' ', name)
         return name.strip() if name.strip() else None
+
+    @staticmethod
+    def normalize_media_title_variants(value: Any) -> List[str]:
+        """把媒体标题归一化成若干可匹配变体，用于播放保护的宽松标题匹配。"""
+        text = str(value or "").strip()
+        if not text:
+            return []
+        variants = []
+
+        def add(item: str):
+            item = str(item or "").strip().lower()
+            item = re.sub(r'[\(\[（【].*?[\)\]）】]', ' ', item)
+            item = re.sub(r'\b(19|20)\d{2}\b', ' ', item)
+            item = re.sub(r'\b(s\d{1,2}e\d{1,4}|season\s*\d+|第\s*\d+\s*季|第\s*\d+\s*集|ep?\s*\d+)\b', ' ', item, flags=re.IGNORECASE)
+            item = re.sub(r'\b(1080p|720p|4k|2160p|480p|360p|web-dl|bluray|bdrip|hdtv|x264|x265|hdr|dv)\b', ' ', item, flags=re.IGNORECASE)
+            item = re.sub(r'[^\w\u4e00-\u9fff]+', ' ', item)
+            item = re.sub(r'\s{2,}', ' ', item).strip()
+            if item and item not in variants:
+                variants.append(item)
+
+        add(text)
+        add(re.sub(r'\s*-\s*.*$', '', text))
+        return variants

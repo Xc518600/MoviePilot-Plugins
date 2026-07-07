@@ -3,7 +3,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from app.chain.media import MediaChain
 from app.log import logger
@@ -39,6 +39,7 @@ class DiskSpaceScanner:
             "items_scanned": 0,
             "protected_skipped": 0,
             "recent_skipped": 0,
+            "active_play_skipped": 0,
             "incomplete_series_skipped": 0,
             "zero_size_skipped": 0,
             "error_skipped": 0,
@@ -54,6 +55,7 @@ class DiskSpaceScanner:
         recent_seconds = max(0, int(self._plugin._recent_days_protect or 0)) * 86400
         max_items = max(1, int(self._plugin._max_scan_items or 5000))
         depth = max(1, int(self._plugin._candidate_depth or 2))
+        active_titles = self._collect_active_media_titles()
         
         # 使用多线程并行扫描多个媒体根目录
         scan_start_time = time.time()
@@ -67,7 +69,7 @@ class DiskSpaceScanner:
             future_to_root = {
                 executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
                                max_items, protect_dirs, protect_keywords,
-                               size_cache, size_cache_lock, target_release_gb): root
+                               size_cache, size_cache_lock, target_release_gb, active_titles): root
                 for root in media_paths
             }
             
@@ -84,6 +86,7 @@ class DiskSpaceScanner:
                         diagnosis["roots_rejected"] += root_diagnosis.get("roots_rejected", 0)
                         diagnosis["protected_skipped"] += root_diagnosis.get("protected_skipped", 0)
                         diagnosis["recent_skipped"] += root_diagnosis.get("recent_skipped", 0)
+                        diagnosis["active_play_skipped"] += root_diagnosis.get("active_play_skipped", 0)
                         diagnosis["incomplete_series_skipped"] += root_diagnosis.get("incomplete_series_skipped", 0)
                         diagnosis["zero_size_skipped"] += root_diagnosis.get("zero_size_skipped", 0)
                         diagnosis["error_skipped"] += root_diagnosis.get("error_skipped", 0)
@@ -106,7 +109,7 @@ class DiskSpaceScanner:
         logger.info(
             f"候选扫描完成：候选={len(candidates)}项，扫描={diagnosis['items_scanned']}项，"
             f"缺失={diagnosis['roots_missing']}，保护跳过={diagnosis['protected_skipped']}，"
-            f"最近跳过={diagnosis['recent_skipped']}，电视剧未完结/不完整跳过={diagnosis['incomplete_series_skipped']}，"
+            f"最近跳过={diagnosis['recent_skipped']}，播放保护跳过={diagnosis['active_play_skipped']}，电视剧未完结/不完整跳过={diagnosis['incomplete_series_skipped']}，"
             f"错误={diagnosis['error_skipped']}，耗时={scan_time:.2f}秒"
         )
         
@@ -115,7 +118,7 @@ class DiskSpaceScanner:
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
                          size_cache: Dict[str, int], size_cache_lock: threading.Lock,
-                         target_release_gb: float = 0) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         target_release_gb: float = 0, active_titles: Optional[Set[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
         candidates: List[Dict[str, Any]] = []
@@ -125,6 +128,7 @@ class DiskSpaceScanner:
             "roots_rejected": 0,
             "protected_skipped": 0,
             "recent_skipped": 0,
+            "active_play_skipped": 0,
             "incomplete_series_skipped": 0,
             "zero_size_skipped": 0,
             "error_skipped": 0,
@@ -160,6 +164,12 @@ class DiskSpaceScanner:
                     stat = child.stat()
                     if recent_seconds and now - stat.st_mtime < recent_seconds:
                         diagnosis["recent_skipped"] += 1
+                        continue
+
+                    active_match_reason = self._match_active_media(child, active_titles)
+                    if active_match_reason:
+                        diagnosis["active_play_skipped"] += 1
+                        logger.info(f"跳过正在播放候选：{child.name}，原因={active_match_reason}")
                         continue
 
                     if DiskSpaceUtils.is_series_candidate(child):
@@ -259,6 +269,7 @@ class DiskSpaceScanner:
                         "poster": poster,
                         "tmdb_reason": tmdb_reason,
                         "type": "目录" if child.is_dir() else "文件",
+                        "activity_reason": "未命中播放保护",
                     })
                     logger.info(
                         f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
@@ -309,6 +320,79 @@ class DiskSpaceScanner:
             "inactive_score": round(inactive_score, 2),
             "score": round(score, 2),
         }
+
+    def _collect_active_media_titles(self) -> Set[str]:
+        """收集当前媒体服务器正在播放的标题，供候选保护使用。"""
+        if not getattr(self._plugin, "_active_play_protect", False):
+            return set()
+        media_server_name = (getattr(self._plugin, "_media_server", "") or "").strip()
+        if not media_server_name:
+            return set()
+        try:
+            service = self._plugin._get_media_server_service(media_server_name)
+        except Exception:
+            service = None
+        if not service or not getattr(service, "instance", None):
+            logger.warning(f"正在播放保护获取媒体服务器失败：{media_server_name}")
+            return set()
+        try:
+            service_type = str(getattr(service, "type", "") or "").lower()
+            if service_type == "emby":
+                return self._collect_emby_like_active_titles(service, "[HOST]emby/Sessions?api_key=***")
+            if service_type == "jellyfin":
+                return self._collect_emby_like_active_titles(service, "[HOST]Sessions?api_key=***")
+            if service_type == "plex":
+                return self._collect_plex_active_titles(service)
+            logger.warning(f"正在播放保护暂不支持的媒体服务器类型：{service_type}")
+        except Exception as e:
+            logger.warning(f"收集正在播放媒体失败：{e}")
+        return set()
+
+    def _collect_emby_like_active_titles(self, service, api_path: str) -> Set[str]:
+        titles: Set[str] = set()
+        res = service.instance.get_data(api_path)
+        if not res or getattr(res, "status_code", None) != 200:
+            return titles
+        for session in res.json() or []:
+            item = session.get("NowPlayingItem") or {}
+            if not item:
+                continue
+            if session.get("PlayState", {}).get("IsPaused"):
+                continue
+            media_type = str(item.get("MediaType") or "")
+            if media_type and media_type.lower() != "video":
+                continue
+            for raw in [item.get("Name"), item.get("OriginalTitle"), item.get("SeriesName")]:
+                titles.update(DiskSpaceUtils.normalize_media_title_variants(raw))
+        return titles
+
+    def _collect_plex_active_titles(self, service) -> Set[str]:
+        titles: Set[str] = set()
+        plex = service.instance.get_plex()
+        if not plex:
+            return titles
+        for session in plex.sessions() or []:
+            session_type = getattr(session, "TAG", "") or getattr(session, "type", "")
+            if session_type and str(session_type).lower() != "video":
+                continue
+            player = getattr(session, "player", None)
+            state = getattr(player, "state", "") if player else ""
+            if state and str(state).lower() == "paused":
+                continue
+            for raw in [getattr(session, "title", None), getattr(session, "grandparentTitle", None), getattr(session, "parentTitle", None)]:
+                titles.update(DiskSpaceUtils.normalize_media_title_variants(raw))
+        return titles
+
+    def _match_active_media(self, child: Path, active_titles: Optional[Set[str]]) -> Optional[str]:
+        if not active_titles:
+            return None
+        candidates = set()
+        candidates.update(DiskSpaceUtils.normalize_media_title_variants(child.name))
+        candidates.update(DiskSpaceUtils.normalize_media_title_variants(DiskSpaceUtils.extract_movie_title(child)))
+        for title in candidates:
+            if title and title in active_titles:
+                return f"当前正在播放（标题命中：{title}）"
+        return None
 
     def _get_tmdb_rating(self, path: Path, mtime: float) -> Optional[Dict[str, Any]]:
         """获取 TMDB 评分，按路径和 mtime 缓存 30 天。"""
