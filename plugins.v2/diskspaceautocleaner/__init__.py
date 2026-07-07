@@ -21,7 +21,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.2.24"
+    plugin_version = "3.2.25"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -47,6 +47,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _media_server = ""
     _active_play_protect = True
+    _recent_play_days = 7
     _run_once = False
     _tmdb_rating_cache: Dict[str, Dict[str, Any]] = {}
     _poster_cache: Dict[str, Optional[str]] = {}
@@ -83,6 +84,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
             self._media_server = config.get("media_server") or ""
             self._active_play_protect = DiskSpaceUtils.to_bool(config.get("active_play_protect"), True)
+            self._recent_play_days = DiskSpaceUtils.to_int(config.get("recent_play_days"), 7)
 
         self.stop_service()
         if self._run_once:
@@ -195,6 +197,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "recent_play_days", "label": "最近播放降权天数", "type": "number", "placeholder": "7", "hint": "大于0时，命中最近播放记录的媒体会降低删除优先级；0 表示关闭"}}]
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{"component": "VTextField", "props": {"model": "min_free_gb", "label": "触发剩余空间GB", "type": "number", "placeholder": "5"}}]
                             },
@@ -274,6 +281,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "history": self._history,
             "media_server": self._media_server,
             "active_play_protect": self._active_play_protect,
+            "recent_play_days": self._recent_play_days,
             "sources": "immediate",
         }
 
@@ -368,7 +376,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         href = f"https://www.themoviedb.org/{tmdb_type}/{tmdb_id}" if tmdb_id else "#"
         rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
 
-        activity_reason = item.get("activity_reason") or "未命中播放保护"
+        activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
         details = [
             f"评分: {score:.2f}（{rank_text}）",
             f"大小: {float(item.get('size_gb') or 0):.2f}GB｜陈旧: {item.get('age_days') or 0}天",

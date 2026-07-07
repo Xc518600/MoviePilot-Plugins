@@ -691,6 +691,21 @@ class DiskSpaceUtils:
         return name.strip() if name.strip() else None
 
     @staticmethod
+
+    @staticmethod
+    def parse_datetime_to_timestamp(value: Any) -> Optional[float]:
+        """解析 Emby/Jellyfin 常见时间字符串为时间戳。"""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            from datetime import datetime
+            if text.endswith('Z'):
+                text = text[:-1] + '+00:00'
+            return datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return None
+
     def normalize_media_title_variants(value: Any) -> List[str]:
         """把媒体标题归一化成若干可匹配变体，用于播放保护的宽松标题匹配。"""
         text = str(value or "").strip()

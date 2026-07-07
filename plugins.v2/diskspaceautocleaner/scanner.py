@@ -56,6 +56,7 @@ class DiskSpaceScanner:
         max_items = max(1, int(self._plugin._max_scan_items or 5000))
         depth = max(1, int(self._plugin._candidate_depth or 2))
         active_titles = self._collect_active_media_titles()
+        recent_titles = self._collect_recent_media_titles()
         
         # 使用多线程并行扫描多个媒体根目录
         scan_start_time = time.time()
@@ -69,7 +70,7 @@ class DiskSpaceScanner:
             future_to_root = {
                 executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
                                max_items, protect_dirs, protect_keywords,
-                               size_cache, size_cache_lock, target_release_gb, active_titles): root
+                               size_cache, size_cache_lock, target_release_gb, active_titles, recent_titles): root
                 for root in media_paths
             }
             
@@ -118,7 +119,7 @@ class DiskSpaceScanner:
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
                          size_cache: Dict[str, int], size_cache_lock: threading.Lock,
-                         target_release_gb: float = 0, active_titles: Optional[Set[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         target_release_gb: float = 0, active_titles: Optional[Set[str]] = None, recent_titles: Optional[Set[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
         candidates: List[Dict[str, Any]] = []
@@ -243,9 +244,13 @@ class DiskSpaceScanner:
                     else:
                         diagnosis["tmdb_rating_ignored"] += 1
 
+                    recent_match_reason = self._match_recent_media(child, recent_titles)
+                    recent_penalty = -20.0 if recent_match_reason else 0.0
+
                     score_detail = self._score_candidate(size_gb=size_gb, age_days=age_days,
                                                          target_release_gb=target_release_gb,
-                                                         tmdb_modifier=tmdb_modifier)
+                                                         tmdb_modifier=tmdb_modifier,
+                                                         inactive_score=recent_penalty)
                     score = score_detail["score"]
                     
                     candidates.append({
@@ -269,13 +274,13 @@ class DiskSpaceScanner:
                         "poster": poster,
                         "tmdb_reason": tmdb_reason,
                         "type": "目录" if child.is_dir() else "文件",
-                        "activity_reason": "未命中播放保护",
+                        "activity_reason": recent_match_reason or "未命中播放保护/最近播放降权",
                     })
                     logger.info(
                         f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
                         f"空间分={score_detail['space_score']:.2f}，时间分={score_detail['age_score']:.2f}，"
                         f"低活跃分={score_detail['inactive_score']:.2f}，TMDB修正={tmdb_modifier:.2f}，"
-                        f"总分={score:.2f}，TMDB={tmdb_reason}"
+                        f"总分={score:.2f}，活跃度={recent_match_reason or '未命中'}，TMDB={tmdb_reason}"
                     )
                 except Exception as e:
                     diagnosis["error_skipped"] += 1
@@ -300,7 +305,7 @@ class DiskSpaceScanner:
         return 0.0
 
     def _score_candidate(self, size_gb: float, age_days: int,
-                         target_release_gb: float, tmdb_modifier: float = 0) -> Dict[str, float]:
+                         target_release_gb: float, tmdb_modifier: float = 0, inactive_score: float = 0) -> Dict[str, float]:
         """
         计算候选删除优先级：空间收益分 + 时间陈旧分 + 低活跃分 + TMDB评分修正分。
 
@@ -312,7 +317,7 @@ class DiskSpaceScanner:
             target = max(float(size_gb or 0), 1.0)
         space_score = min(40.0, max(0.0, float(size_gb or 0)) / target * 40.0)
         age_score = self._age_bucket_score(int(age_days or 0), 30.0)
-        inactive_score = 0.0
+        inactive_score = float(inactive_score or 0)
         score = space_score + age_score + inactive_score + float(tmdb_modifier or 0)
         return {
             "space_score": round(space_score, 2),
