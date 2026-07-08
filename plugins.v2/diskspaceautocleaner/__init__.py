@@ -21,7 +21,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.3.0"
+    plugin_version = "3.3.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -87,7 +87,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._media_server = config.get("media_server") or ""
             self._active_play_protect = DiskSpaceUtils.to_bool(config.get("active_play_protect"), True)
             self._recent_play_days = DiskSpaceUtils.to_int(config.get("recent_play_days"), 7)
-            self._strategy_profiles = config.get("strategy_profiles") or ""
+            strategy_profiles = config.get("strategy_profiles") or ""
+            form_strategy_profiles = self._build_strategy_profiles_from_form(config)
+            self._strategy_profiles = form_strategy_profiles or strategy_profiles
 
         self.stop_service()
         if self._run_once:
@@ -246,6 +248,124 @@ class DiskSpaceAutoCleaner(_PluginBase):
         for key, value in (previous or {}).items():
             setattr(self, key, value)
 
+    def _build_strategy_profiles_from_form(self, config: Dict[str, Any]) -> str:
+        """从可视化表单字段拼回 strategy_profiles 文本，兼容旧版文本配置。"""
+        if not isinstance(config, dict):
+            return ""
+
+        def norm_lines(value: Any) -> str:
+            return "\n".join([x.strip() for x in str(value or "").replace("\r\n", "\n").split("\n") if x.strip()])
+
+        def norm_csv(value: Any) -> str:
+            parts = []
+            for raw in str(value or "").replace("，", ",").replace(";", ",").split(","):
+                raw = raw.strip()
+                if raw:
+                    parts.append(raw)
+            return ",".join(parts)
+
+        blocks: List[str] = []
+        for idx in range(1, 4):
+            prefix = f"strategy_{idx}_"
+            name = str(config.get(prefix + "name") or "").strip()
+            monitor_paths = norm_csv(config.get(prefix + "monitor_paths"))
+            media_paths = norm_csv(config.get(prefix + "media_paths"))
+            if not name and not monitor_paths and not media_paths:
+                continue
+            lines = [f"name={name or f'策略{idx}'}"]
+            for key in ["monitor_paths", "media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items"]:
+                value = config.get(prefix + key)
+                if value is None or str(value).strip() == "":
+                    continue
+                if key in {"monitor_paths", "media_paths"}:
+                    value = norm_csv(value)
+                lines.append(f"{key}={value}")
+            active_play = config.get(prefix + "active_play_protect")
+            if active_play is not None:
+                lines.append(f"active_play_protect={'true' if DiskSpaceUtils.to_bool(active_play, True) else 'false'}")
+            protect_keywords = norm_csv(config.get(prefix + "protect_keywords"))
+            if protect_keywords:
+                lines.append(f"protect_keywords={protect_keywords}")
+            protect_dirs = norm_lines(config.get(prefix + "protect_dirs"))
+            if protect_dirs:
+                lines.append(f"protect_dirs={protect_dirs.replace(chr(10), ',')}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+
+    def _strategy_form_defaults(self, default_media_server: str) -> List[Dict[str, Any]]:
+        templates = [
+            {"name": "硬盘3-外语电影", "recent_days_protect": 15, "recent_play_days": 7, "max_delete_gb": 150},
+            {"name": "硬盘4-国产电视剧", "recent_days_protect": 45, "recent_play_days": 20, "max_delete_gb": 60},
+            {"name": "硬盘5-欧美电视剧", "recent_days_protect": 25, "recent_play_days": 15, "max_delete_gb": 90},
+        ]
+        parsed = self._parse_strategy_profiles()
+        results: List[Dict[str, Any]] = []
+        for idx in range(3):
+            base = {
+                "name": templates[idx]["name"],
+                "monitor_paths": "",
+                "media_paths": "",
+                "min_free_gb": self._min_free_gb,
+                "target_free_gb": self._target_free_gb,
+                "recent_days_protect": templates[idx]["recent_days_protect"],
+                "recent_play_days": templates[idx]["recent_play_days"],
+                "max_delete_gb": templates[idx]["max_delete_gb"],
+                "media_server": default_media_server,
+                "active_play_protect": self._active_play_protect,
+                "protect_keywords": "",
+            }
+            if idx < len(parsed):
+                item = parsed[idx]
+                base.update({
+                    "name": item.get("name") or base["name"],
+                    "monitor_paths": "\n".join(item.get("monitor_paths") or []),
+                    "media_paths": "\n".join(item.get("media_paths") or []),
+                    "min_free_gb": item.get("min_free_gb", base["min_free_gb"]),
+                    "target_free_gb": item.get("target_free_gb", base["target_free_gb"]),
+                    "recent_days_protect": item.get("recent_days_protect", base["recent_days_protect"]),
+                    "recent_play_days": item.get("recent_play_days", base["recent_play_days"]),
+                    "max_delete_gb": item.get("max_delete_gb", base["max_delete_gb"]),
+                    "media_server": item.get("media_server") or base["media_server"],
+                    "active_play_protect": item.get("active_play_protect", base["active_play_protect"]),
+                    "protect_keywords": "\n".join(item.get("protect_keywords") or []),
+                })
+            results.append(base)
+        return results
+
+    def _build_strategy_form_cards(self, mediaserver_items: List[Dict[str, Any]], strategies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        cards: List[Dict[str, Any]] = []
+        for idx, strategy in enumerate(strategies, start=1):
+            prefix = f"strategy_{idx}_"
+            cards.append({
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "mb-2"},
+                    "content": [
+                        {"component": "VCardTitle", "text": f"策略{idx}配置"},
+                        {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "每张卡片对应一个硬盘策略；留空则该策略不生效。"},
+                        {
+                            "component": "VRow",
+                            "content": [
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "name", "label": "策略名称", "placeholder": strategy.get("name") or f"策略{idx}"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": prefix + "media_server", "label": "媒体服务器", "items": mediaserver_items, "hint": "直接选择 MoviePilot 已配置媒体服务器", "persistent-hint": True}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": prefix + "active_play_protect", "label": "正在播放保护"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "monitor_paths", "label": "监控路径", "rows": 2, "placeholder": "/硬盘3", "hint": "每行一个；命中这些盘时启用本策略"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "media_paths", "label": "媒体扫描路径", "rows": 2, "placeholder": "/link3/外语电影", "hint": "每行一个；只扫描这些路径"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "min_free_gb", "label": "触发剩余GB", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "target_free_gb", "label": "目标剩余GB", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_days_protect", "label": "最近新增保护天数", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_play_days", "label": "最近播放降权天数", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_delete_gb", "label": "每次删除最大GB", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [{"component": "VTextarea", "props": {"model": prefix + "protect_keywords", "label": "保护关键词", "rows": 2, "placeholder": "收藏\n经典\n在追", "hint": "每行一个；命中即跳过"}}]},
+                            ]
+                        }
+                    ]
+                }]
+            })
+        return cards
+
     def get_api(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -279,6 +399,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         mediaserver_items = self._service_items(MediaServerHelper().get_configs())
         default_media_server = self._media_server if any(item.get("value") == self._media_server for item in mediaserver_items) else ""
+        strategy_defaults = self._strategy_form_defaults(default_media_server)
+        strategy_cards = self._build_strategy_form_cards(mediaserver_items, strategy_defaults)
         return [
             {
                 "component": "VForm",
@@ -326,11 +448,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [{"component": "VTextarea", "props": {"model": "path_mappings", "label": "硬盘路径到媒体库路径映射", "rows": 4, "placeholder": "/硬盘5=>/link5\n/vol5=>/link5", "hint": "当某个监控硬盘空间不足时，只扫描它对应的媒体库存放路径。格式：监控路径=>媒体库路径，每行一个。例：硬盘5 对应 link5"}}]
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "strategy_profiles", "label": "多策略配置（按硬盘独立策略）", "rows": 14, "placeholder": "name=硬盘3-外语电影\nmonitor_paths=/硬盘3\nmedia_paths=/link3/外语电影\nmin_free_gb=80\ntarget_free_gb=150\nrecent_days_protect=15\nrecent_play_days=7\nmax_delete_gb=150\nmedia_server=Emby\nprotect_keywords=收藏,经典,IMAX\n\nname=硬盘4-国产电视剧\nmonitor_paths=/硬盘4\nmedia_paths=/link4/国产电视剧\nmin_free_gb=120\ntarget_free_gb=200\nrecent_days_protect=45\nrecent_play_days=20\nmax_delete_gb=60\nmedia_server=Emby\nprotect_keywords=在追,待看,完结保留", "hint": "空行分隔多个策略块，每行 key=value。支持 name、monitor_paths、media_paths、min_free_gb、target_free_gb、recent_days_protect、recent_play_days、max_delete_gb、media_server、active_play_protect、protect_dirs、protect_keywords、candidate_depth、max_candidates、max_scan_items。monitor_paths 会自动加入总监控列表。"}}]
-                            },
+                            *strategy_cards,
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
@@ -424,6 +542,39 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "active_play_protect": self._active_play_protect,
             "recent_play_days": self._recent_play_days,
             "strategy_profiles": self._strategy_profiles,
+            "strategy_1_name": strategy_defaults[0]["name"],
+            "strategy_1_monitor_paths": strategy_defaults[0]["monitor_paths"],
+            "strategy_1_media_paths": strategy_defaults[0]["media_paths"],
+            "strategy_1_min_free_gb": strategy_defaults[0]["min_free_gb"],
+            "strategy_1_target_free_gb": strategy_defaults[0]["target_free_gb"],
+            "strategy_1_recent_days_protect": strategy_defaults[0]["recent_days_protect"],
+            "strategy_1_recent_play_days": strategy_defaults[0]["recent_play_days"],
+            "strategy_1_max_delete_gb": strategy_defaults[0]["max_delete_gb"],
+            "strategy_1_media_server": strategy_defaults[0]["media_server"],
+            "strategy_1_active_play_protect": strategy_defaults[0]["active_play_protect"],
+            "strategy_1_protect_keywords": strategy_defaults[0]["protect_keywords"],
+            "strategy_2_name": strategy_defaults[1]["name"],
+            "strategy_2_monitor_paths": strategy_defaults[1]["monitor_paths"],
+            "strategy_2_media_paths": strategy_defaults[1]["media_paths"],
+            "strategy_2_min_free_gb": strategy_defaults[1]["min_free_gb"],
+            "strategy_2_target_free_gb": strategy_defaults[1]["target_free_gb"],
+            "strategy_2_recent_days_protect": strategy_defaults[1]["recent_days_protect"],
+            "strategy_2_recent_play_days": strategy_defaults[1]["recent_play_days"],
+            "strategy_2_max_delete_gb": strategy_defaults[1]["max_delete_gb"],
+            "strategy_2_media_server": strategy_defaults[1]["media_server"],
+            "strategy_2_active_play_protect": strategy_defaults[1]["active_play_protect"],
+            "strategy_2_protect_keywords": strategy_defaults[1]["protect_keywords"],
+            "strategy_3_name": strategy_defaults[2]["name"],
+            "strategy_3_monitor_paths": strategy_defaults[2]["monitor_paths"],
+            "strategy_3_media_paths": strategy_defaults[2]["media_paths"],
+            "strategy_3_min_free_gb": strategy_defaults[2]["min_free_gb"],
+            "strategy_3_target_free_gb": strategy_defaults[2]["target_free_gb"],
+            "strategy_3_recent_days_protect": strategy_defaults[2]["recent_days_protect"],
+            "strategy_3_recent_play_days": strategy_defaults[2]["recent_play_days"],
+            "strategy_3_max_delete_gb": strategy_defaults[2]["max_delete_gb"],
+            "strategy_3_media_server": strategy_defaults[2]["media_server"],
+            "strategy_3_active_play_protect": strategy_defaults[2]["active_play_protect"],
+            "strategy_3_protect_keywords": strategy_defaults[2]["protect_keywords"],
             "sources": "immediate",
         }
 
