@@ -353,6 +353,44 @@ class DiskSpaceScanner:
             logger.warning(f"收集正在播放媒体失败：{e}")
         return set()
 
+
+    def _collect_recent_media_titles(self) -> Set[str]:
+        """收集最近 N 天播放过的标题，用于降低删除优先级。"""
+        days = max(0, int(getattr(self._plugin, "_recent_play_days", 0) or 0))
+        if days <= 0:
+            return set()
+        media_server_name = (getattr(self._plugin, "_media_server", "") or "").strip()
+        if not media_server_name:
+            return set()
+        service = self._plugin._get_media_server_service(media_server_name)
+        if not service or not getattr(service, "instance", None):
+            return set()
+        service_type = str(getattr(service, "type", "") or "").lower()
+        try:
+            if service_type in {"emby", "jellyfin"}:
+                return self._collect_emby_like_recent_titles(service, days, service_type)
+        except Exception as e:
+            logger.warning(f"收集最近播放媒体失败：{e}")
+        return set()
+
+    def _collect_emby_like_recent_titles(self, service, days: int, service_type: str) -> Set[str]:
+        titles: Set[str] = set()
+        api_path = "[HOST]emby/Users/[USER]/Items/Resume?Limit=200&Recursive=true&Fields=DateLastPlayed,UserData" if service_type == "emby" else "[HOST]Users/[USER]/Items/Resume?Limit=200&Recursive=true&Fields=DateLastPlayed,UserData"
+        res = service.instance.get_data(api_path)
+        if not res or getattr(res, "status_code", None) != 200:
+            return titles
+        data = res.json() or {}
+        items = data.get("Items") if isinstance(data, dict) else []
+        cutoff = time.time() - days * 86400
+        for item in items or []:
+            played = (item.get("UserData") or {}).get("LastPlayedDate") or item.get("DateLastPlayed")
+            ts = DiskSpaceUtils.parse_datetime_to_timestamp(played)
+            if not ts or ts < cutoff:
+                continue
+            for raw in [item.get("Name"), item.get("OriginalTitle"), item.get("SeriesName")]:
+                titles.update(DiskSpaceUtils.normalize_media_title_variants(raw))
+        return titles
+
     def _collect_emby_like_active_titles(self, service, api_path: str) -> Set[str]:
         titles: Set[str] = set()
         res = service.instance.get_data(api_path)
@@ -387,6 +425,19 @@ class DiskSpaceScanner:
             for raw in [getattr(session, "title", None), getattr(session, "grandparentTitle", None), getattr(session, "parentTitle", None)]:
                 titles.update(DiskSpaceUtils.normalize_media_title_variants(raw))
         return titles
+
+
+    def _match_recent_media(self, child: Path, recent_titles: Optional[Set[str]]) -> Optional[str]:
+        if not recent_titles:
+            return None
+        candidates = set()
+        candidates.update(DiskSpaceUtils.normalize_media_title_variants(child.name))
+        candidates.update(DiskSpaceUtils.normalize_media_title_variants(DiskSpaceUtils.extract_movie_title(child)))
+        days = max(0, int(getattr(self._plugin, "_recent_play_days", 0) or 0))
+        for title in candidates:
+            if title and title in recent_titles:
+                return f"最近{days}天播放过（标题命中：{title}）"
+        return None
 
     def _match_active_media(self, child: Path, active_titles: Optional[Set[str]]) -> Optional[str]:
         if not active_titles:
