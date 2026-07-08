@@ -15,8 +15,9 @@ class DiskSpaceNotifier:
     
     def notify_report(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                        selected: List[Dict[str, Any]], needed_gb: float, scan_paths: Optional[List[str]] = None,
-                       diagnosis: Optional[Dict[str, Any]] = None, delete_errors: Optional[List[str]] = None):
-        """发送清理报告（精简版）。"""
+                       diagnosis: Optional[Dict[str, Any]] = None, delete_errors: Optional[List[str]] = None,
+                       strategy_name: Optional[str] = None):
+        """发送清理报告（按策略区分）。"""
         if not self._plugin._notify:
             return
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
