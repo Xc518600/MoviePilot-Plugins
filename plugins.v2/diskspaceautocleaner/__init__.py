@@ -21,7 +21,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.3.2"
+    plugin_version = "3.4.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -45,9 +45,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _protect_keywords = ""
     _history_limit = 50
     _history: List[Dict[str, Any]] = []
+    _scan_state: Dict[str, Dict[str, Any]] = {}
     _media_server = ""
     _active_play_protect = True
     _recent_play_days = 7
+    _scan_cooldown_minutes = 360
+    _scan_backoff_multiplier = 2
+    _scan_backoff_max_minutes = 1440
+    _tmdb_top_n = 30
     _strategy_profiles = ""
     _current_strategy_name = ""
     _run_once = False
@@ -61,8 +66,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     _timer: Optional[threading.Timer] = None
     _lock = threading.Lock()
+    _check_running = False
+    _last_check_started_at = 0.0
+    _dedupe_window_seconds = 30
 
     def init_plugin(self, config: dict = None):
+        triggered_immediate_run = False
         if config:
             self._enabled = DiskSpaceUtils.to_bool(config.get("enabled"), False)
             self._notify = DiskSpaceUtils.to_bool(config.get("notify"), True)
@@ -83,10 +92,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._history_limit = DiskSpaceUtils.to_int(config.get("history_limit"), 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
+            scan_state = config.get("scan_state") or {}
+            self._scan_state = scan_state if isinstance(scan_state, dict) else {}
             self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
             self._media_server = config.get("media_server") or ""
             self._active_play_protect = DiskSpaceUtils.to_bool(config.get("active_play_protect"), True)
             self._recent_play_days = DiskSpaceUtils.to_int(config.get("recent_play_days"), 7)
+            self._scan_cooldown_minutes = DiskSpaceUtils.to_int(config.get("scan_cooldown_minutes"), 360)
+            self._scan_backoff_multiplier = max(1, DiskSpaceUtils.to_int(config.get("scan_backoff_multiplier"), 2))
+            self._scan_backoff_max_minutes = DiskSpaceUtils.to_int(config.get("scan_backoff_max_minutes"), 1440)
+            self._tmdb_top_n = max(1, DiskSpaceUtils.to_int(config.get("tmdb_top_n"), 30))
             strategy_profiles = config.get("strategy_profiles") or ""
             form_strategy_profiles = self._build_strategy_profiles_from_form(config)
             self._strategy_profiles = form_strategy_profiles or strategy_profiles
@@ -97,7 +112,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._run_once = False
             self._persist_config()
             if self._enabled:
-                threading.Thread(target=self._run_check, daemon=True).start()
+                triggered_immediate_run = True
+                threading.Thread(target=lambda: self._run_check(schedule_next=False, trigger="config_run_once"), daemon=True).start()
             else:
                 logger.info("硬盘空间自动清理未启用，忽略立即运行请求")
 
@@ -106,7 +122,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 f"硬盘空间自动清理已启用：dry_run={self._dry_run}, interval={self._scan_interval_minutes}min, "
                 f"min_free={self._min_free_gb}GB, target_free={self._target_free_gb}GB"
             )
-            self._schedule_next(initial=True)
+            self._schedule_next(initial=not triggered_immediate_run)
         else:
             logger.info("硬盘空间自动清理未启用")
 
@@ -167,6 +183,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 'candidate_depth': DiskSpaceUtils.to_int(item.get('candidate_depth'), self._candidate_depth),
                 'max_candidates': DiskSpaceUtils.to_int(item.get('max_candidates'), self._max_candidates),
                 'max_scan_items': DiskSpaceUtils.to_int(item.get('max_scan_items'), self._max_scan_items),
+                'scan_cooldown_minutes': DiskSpaceUtils.to_int(item.get('scan_cooldown_minutes'), self._scan_cooldown_minutes),
+                'scan_backoff_multiplier': max(1, DiskSpaceUtils.to_int(item.get('scan_backoff_multiplier'), self._scan_backoff_multiplier)),
+                'scan_backoff_max_minutes': DiskSpaceUtils.to_int(item.get('scan_backoff_max_minutes'), self._scan_backoff_max_minutes),
+                'tmdb_top_n': max(1, DiskSpaceUtils.to_int(item.get('tmdb_top_n'), self._tmdb_top_n)),
                 'media_server': item.get('media_server') or self._media_server,
                 'active_play_protect': DiskSpaceUtils.to_bool(item.get('active_play_protect'), self._active_play_protect),
                 'protect_dirs': split_list(item.get('protect_dirs', '')) or DiskSpaceUtils.lines(self._protect_dirs),
@@ -199,6 +219,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             'candidate_depth': self._candidate_depth,
             'max_candidates': self._max_candidates,
             'max_scan_items': self._max_scan_items,
+            'scan_cooldown_minutes': self._scan_cooldown_minutes,
+            'scan_backoff_multiplier': self._scan_backoff_multiplier,
+            'scan_backoff_max_minutes': self._scan_backoff_max_minutes,
+            'tmdb_top_n': self._tmdb_top_n,
             'media_server': self._media_server,
             'active_play_protect': self._active_play_protect,
             'protect_dirs': DiskSpaceUtils.lines(self._protect_dirs),
@@ -233,6 +257,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             '_candidate_depth': strategy.get('candidate_depth', self._candidate_depth),
             '_max_candidates': strategy.get('max_candidates', self._max_candidates),
             '_max_scan_items': strategy.get('max_scan_items', self._max_scan_items),
+            '_scan_cooldown_minutes': strategy.get('scan_cooldown_minutes', self._scan_cooldown_minutes),
+            '_scan_backoff_multiplier': strategy.get('scan_backoff_multiplier', self._scan_backoff_multiplier),
+            '_scan_backoff_max_minutes': strategy.get('scan_backoff_max_minutes', self._scan_backoff_max_minutes),
+            '_tmdb_top_n': strategy.get('tmdb_top_n', self._tmdb_top_n),
             '_media_server': strategy.get('media_server', self._media_server),
             '_active_play_protect': strategy.get('active_play_protect', self._active_play_protect),
             '_protect_dirs': chr(10).join(strategy.get('protect_dirs') or []),
@@ -273,7 +301,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if not name and not monitor_paths and not media_paths:
                 continue
             lines = [f"name={name or f'策略{idx}'}"]
-            for key in ["monitor_paths", "media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items"]:
+            for key in ["monitor_paths", "media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n"]:
                 value = config.get(prefix + key)
                 if value is None or str(value).strip() == "":
                     continue
@@ -310,6 +338,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "recent_days_protect": templates[idx]["recent_days_protect"],
                 "recent_play_days": templates[idx]["recent_play_days"],
                 "max_delete_gb": templates[idx]["max_delete_gb"],
+                "scan_cooldown_minutes": self._scan_cooldown_minutes,
+                "scan_backoff_multiplier": self._scan_backoff_multiplier,
+                "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
+                "tmdb_top_n": self._tmdb_top_n,
                 "media_server": default_media_server,
                 "active_play_protect": self._active_play_protect,
                 "protect_keywords": "",
@@ -325,6 +357,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "recent_days_protect": item.get("recent_days_protect", base["recent_days_protect"]),
                     "recent_play_days": item.get("recent_play_days", base["recent_play_days"]),
                     "max_delete_gb": item.get("max_delete_gb", base["max_delete_gb"]),
+                    "scan_cooldown_minutes": item.get("scan_cooldown_minutes", base["scan_cooldown_minutes"]),
+                    "scan_backoff_multiplier": item.get("scan_backoff_multiplier", base["scan_backoff_multiplier"]),
+                    "scan_backoff_max_minutes": item.get("scan_backoff_max_minutes", base["scan_backoff_max_minutes"]),
+                    "tmdb_top_n": item.get("tmdb_top_n", base["tmdb_top_n"]),
                     "media_server": item.get("media_server") or base["media_server"],
                     "active_play_protect": item.get("active_play_protect", base["active_play_protect"]),
                     "protect_keywords": "\n".join(item.get("protect_keywords") or []),
@@ -358,6 +394,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_days_protect", "label": "最近新增保护天数", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_play_days", "label": "最近播放降权天数", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_delete_gb", "label": "每次删除最大GB", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_cooldown_minutes", "label": "扫描冷却分钟", "type": "number", "hint": "持续低空间时，本策略两次候选扫描的最短间隔"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "hint": "连续低空间时，扫描冷却会按倍率递增"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "hint": "只对前 N 个初筛候选做 TMDB 评分修正"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [{"component": "VTextarea", "props": {"model": prefix + "protect_keywords", "label": "保护关键词", "rows": 2, "placeholder": "收藏\n经典\n在追", "hint": "每行一个；命中即跳过"}}]},
                             ]
                         }
@@ -381,7 +421,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
         """插件 API：立即运行一次空间检查。"""
         try:
             logger.info("硬盘空间自动清理收到 API 立即运行请求")
-            threading.Thread(target=self._run_check, daemon=True).start()
+            self.stop_service()
+            if self._enabled:
+                self._schedule_next(initial=False)
+            threading.Thread(target=lambda: self._run_check(schedule_next=False, trigger="api_run_now"), daemon=True).start()
             return {"success": True, "message": "已开始后台执行空间检查"}
         except Exception as e:
             logger.error(f"硬盘空间自动清理 API 立即运行失败：{e}", exc_info=True)
@@ -477,7 +520,22 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
+                                "content": [{"component": "VTextField", "props": {"model": "scan_cooldown_minutes", "label": "扫描冷却分钟", "type": "number", "placeholder": "360", "hint": "持续低空间时，两次候选扫描的最短间隔"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
                                 "content": [{"component": "VTextField", "props": {"model": "recent_days_protect", "label": "最近新增保护天数", "type": "number", "placeholder": "30"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{"component": "VTextField", "props": {"model": "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "placeholder": "2"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{"component": "VTextField", "props": {"model": "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number", "placeholder": "1440"}}]
                             },
                             {
                                 "component": "VCol",
@@ -493,6 +551,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "candidate_depth", "label": "候选扫描深度", "type": "number", "placeholder": "2", "hint": "默认2层，可识别 /link5/电影/电影A；填1只扫描根目录第一层"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "placeholder": "30", "hint": "只对前 N 个初筛候选做 TMDB 评分修正，减少扫描期重处理"}}]
                             },
                             {
                                 "component": "VCol",
@@ -529,15 +592,20 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "min_free_gb": self._min_free_gb,
             "target_free_gb": self._target_free_gb,
             "scan_interval_minutes": self._scan_interval_minutes,
+            "scan_cooldown_minutes": self._scan_cooldown_minutes,
+            "scan_backoff_multiplier": self._scan_backoff_multiplier,
+            "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
             "max_candidates": self._max_candidates,
             "max_scan_items": self._max_scan_items,
             "candidate_depth": self._candidate_depth,
+            "tmdb_top_n": self._tmdb_top_n,
             "recent_days_protect": self._recent_days_protect,
             "protect_dirs": self._protect_dirs,
             "protect_keywords": self._protect_keywords,
             "history_limit": self._history_limit,
             "max_delete_gb": self._max_delete_gb,
             "history": self._history,
+            "scan_state": self._scan_state,
             "media_server": default_media_server,
             "active_play_protect": self._active_play_protect,
             "recent_play_days": self._recent_play_days,
@@ -550,6 +618,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "strategy_1_recent_days_protect": strategy_defaults[0]["recent_days_protect"],
             "strategy_1_recent_play_days": strategy_defaults[0]["recent_play_days"],
             "strategy_1_max_delete_gb": strategy_defaults[0]["max_delete_gb"],
+            "strategy_1_scan_cooldown_minutes": strategy_defaults[0]["scan_cooldown_minutes"],
+            "strategy_1_scan_backoff_multiplier": strategy_defaults[0]["scan_backoff_multiplier"],
+            "strategy_1_scan_backoff_max_minutes": strategy_defaults[0]["scan_backoff_max_minutes"],
+            "strategy_1_tmdb_top_n": strategy_defaults[0]["tmdb_top_n"],
             "strategy_1_media_server": strategy_defaults[0]["media_server"],
             "strategy_1_active_play_protect": strategy_defaults[0]["active_play_protect"],
             "strategy_1_protect_keywords": strategy_defaults[0]["protect_keywords"],
@@ -561,6 +633,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "strategy_2_recent_days_protect": strategy_defaults[1]["recent_days_protect"],
             "strategy_2_recent_play_days": strategy_defaults[1]["recent_play_days"],
             "strategy_2_max_delete_gb": strategy_defaults[1]["max_delete_gb"],
+            "strategy_2_scan_cooldown_minutes": strategy_defaults[1]["scan_cooldown_minutes"],
+            "strategy_2_scan_backoff_multiplier": strategy_defaults[1]["scan_backoff_multiplier"],
+            "strategy_2_scan_backoff_max_minutes": strategy_defaults[1]["scan_backoff_max_minutes"],
+            "strategy_2_tmdb_top_n": strategy_defaults[1]["tmdb_top_n"],
             "strategy_2_media_server": strategy_defaults[1]["media_server"],
             "strategy_2_active_play_protect": strategy_defaults[1]["active_play_protect"],
             "strategy_2_protect_keywords": strategy_defaults[1]["protect_keywords"],
@@ -572,6 +648,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "strategy_3_recent_days_protect": strategy_defaults[2]["recent_days_protect"],
             "strategy_3_recent_play_days": strategy_defaults[2]["recent_play_days"],
             "strategy_3_max_delete_gb": strategy_defaults[2]["max_delete_gb"],
+            "strategy_3_scan_cooldown_minutes": strategy_defaults[2]["scan_cooldown_minutes"],
+            "strategy_3_scan_backoff_multiplier": strategy_defaults[2]["scan_backoff_multiplier"],
+            "strategy_3_scan_backoff_max_minutes": strategy_defaults[2]["scan_backoff_max_minutes"],
+            "strategy_3_tmdb_top_n": strategy_defaults[2]["tmdb_top_n"],
             "strategy_3_media_server": strategy_defaults[2]["media_server"],
             "strategy_3_active_play_protect": strategy_defaults[2]["active_play_protect"],
             "strategy_3_protect_keywords": strategy_defaults[2]["protect_keywords"],
@@ -830,13 +910,32 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._timer = timer
         timer.start()
 
-    def _run_check(self):
+    def _run_check(self, schedule_next: bool = True, trigger: str = "scheduled"):
+        now = time.time()
+        with self._lock:
+            if self._check_running:
+                logger.info(f"硬盘空间自动清理已有检查正在进行，跳过本次{trigger}触发，避免重复扫盘")
+                should_run = False
+            elif self._last_check_started_at and now - self._last_check_started_at < self._dedupe_window_seconds:
+                logger.info(
+                    f"距离上次检查仅 {now - self._last_check_started_at:.1f} 秒，跳过本次{trigger}触发，避免重复扫盘"
+                )
+                should_run = False
+            else:
+                self._check_running = True
+                self._last_check_started_at = now
+                should_run = True
+
         try:
-            self._check_space_and_report()
+            if should_run:
+                self._check_space_and_report()
         except Exception as e:
             logger.error(f"硬盘空间自动清理检查失败：{e}", exc_info=True)
         finally:
-            self._schedule_next(initial=False)
+            with self._lock:
+                self._check_running = False
+            if schedule_next and self._enabled:
+                self._schedule_next(initial=False)
 
     def _check_space_and_report(self):
         if not self._enabled:
@@ -873,6 +972,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
                 scan_paths = strategy.get("media_paths") or scanner._media_paths_for_monitor(mpath)
                 if free_gb >= self._min_free_gb:
+                    self._mark_space_recovered(mpath)
                     self._save_record(
                         mpath,
                         free_gb,
@@ -881,6 +981,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         [],
                         f"空间充足：当前剩余 {free_gb:.1f}GB >= 触发阈值 {self._min_free_gb}GB，未生成清理建议",
                         scan_paths,
+                        strategy_name=self._current_strategy_name
+                    )
+                    continue
+
+                if self._should_skip_scan_for_cooldown(mpath):
+                    cooldown_text = self._cooldown_status_text(mpath)
+                    self._save_record(
+                        mpath,
+                        free_gb,
+                        total_gb,
+                        free_percent,
+                        [],
+                        f"空间不足，但处于扫描冷却期：{cooldown_text}",
+                        scan_paths,
+                        diagnosis={"scan_time_seconds": 0, "cooldown_active": True, "cooldown_text": cooldown_text},
                         strategy_name=self._current_strategy_name
                     )
                     continue
@@ -916,6 +1031,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary,
                                  scan_paths, diagnosis=diagnosis, all_candidates=candidates,
                                  strategy_name=self._current_strategy_name)
+                self._mark_low_space_scan(mpath)
 
                 if not self._dry_run and deleted:
                     notifier.notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb,
@@ -977,10 +1093,67 @@ class DiskSpaceAutoCleaner(_PluginBase):
             config.update({
                 "run_once": self._run_once,
                 "history": self._history,
+                "scan_state": self._scan_state,
             })
             self.update_config(config)
         except Exception as e:
             logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
+
+    def _state_key(self, monitor_path: Path) -> str:
+        strategy_name = self._current_strategy_name or monitor_path.as_posix()
+        return f"{monitor_path.as_posix()}::{strategy_name}"
+
+    def _get_scan_state_entry(self, monitor_path: Path) -> Dict[str, Any]:
+        key = self._state_key(monitor_path)
+        entry = self._scan_state.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            self._scan_state[key] = entry
+        return entry
+
+    def _compute_scan_cooldown_minutes(self, entry: Dict[str, Any]) -> int:
+        base = max(0, int(self._scan_cooldown_minutes or 0))
+        multiplier = max(1, int(self._scan_backoff_multiplier or 1))
+        max_minutes = max(base, int(self._scan_backoff_max_minutes or base or 0))
+        streak = max(1, int(entry.get("low_space_scan_streak") or 1))
+        cooldown = base * (multiplier ** max(0, streak - 1)) if base > 0 else 0
+        if max_minutes > 0:
+            cooldown = min(cooldown, max_minutes)
+        return int(cooldown)
+
+    def _should_skip_scan_for_cooldown(self, monitor_path: Path) -> bool:
+        entry = self._get_scan_state_entry(monitor_path)
+        next_allowed = float(entry.get("next_allowed_scan_at") or 0)
+        return next_allowed > time.time()
+
+    def _cooldown_status_text(self, monitor_path: Path) -> str:
+        entry = self._get_scan_state_entry(monitor_path)
+        next_allowed = float(entry.get("next_allowed_scan_at") or 0)
+        remaining = max(0, int(next_allowed - time.time()))
+        cooldown = int(entry.get("last_cooldown_minutes") or 0)
+        streak = int(entry.get("low_space_scan_streak") or 0)
+        if remaining <= 0:
+            return "冷却已结束"
+        minutes, seconds = divmod(remaining, 60)
+        return f"剩余 {minutes}分{seconds}秒（连续低空间扫描 {streak} 次，本轮冷却 {cooldown} 分钟）"
+
+    def _mark_space_recovered(self, monitor_path: Path):
+        entry = self._get_scan_state_entry(monitor_path)
+        entry.update({
+            "low_space_scan_streak": 0,
+            "next_allowed_scan_at": 0,
+            "last_cooldown_minutes": 0,
+            "last_recovered_at": time.time(),
+        })
+
+    def _mark_low_space_scan(self, monitor_path: Path):
+        entry = self._get_scan_state_entry(monitor_path)
+        streak = max(0, int(entry.get("low_space_scan_streak") or 0)) + 1
+        entry["low_space_scan_streak"] = streak
+        entry["last_low_space_scan_at"] = time.time()
+        cooldown = self._compute_scan_cooldown_minutes(entry)
+        entry["last_cooldown_minutes"] = cooldown
+        entry["next_allowed_scan_at"] = time.time() + cooldown * 60 if cooldown > 0 else 0
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,

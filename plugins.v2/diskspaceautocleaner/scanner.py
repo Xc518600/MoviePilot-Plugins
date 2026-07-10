@@ -64,13 +64,20 @@ class DiskSpaceScanner:
             f"候选扫描开始：路径={', '.join(media_paths) or '未配置'}，深度={depth}，"
             f"最大条目={max_items}，线程={self._plugin._scan_workers}"
         )
-        
+
+        stop_event = threading.Event()
+        shared_state = {
+            "candidates": [],
+            "lock": threading.Lock(),
+        }
+
         with ThreadPoolExecutor(max_workers=self._plugin._scan_workers) as executor:
             # 提交所有扫描任务
             future_to_root = {
                 executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
                                max_items, protect_dirs, protect_keywords,
-                               size_cache, size_cache_lock, target_release_gb, active_titles, recent_titles): root
+                               size_cache, size_cache_lock, target_release_gb, active_titles, recent_titles,
+                               stop_event, shared_state): root
                 for root in media_paths
             }
             
@@ -102,7 +109,10 @@ class DiskSpaceScanner:
         
         scan_time = time.time() - scan_start_time
         diagnosis["scan_time_seconds"] = round(scan_time, 2)
-        
+        diagnosis["early_stop_triggered"] = stop_event.is_set()
+
+        self._apply_tmdb_rerank(candidates, diagnosis)
+
         # 检查扫描上限
         if diagnosis["items_scanned"] >= max_items:
             diagnosis["limit_reached"] = True
@@ -119,7 +129,10 @@ class DiskSpaceScanner:
     def _scan_media_root(self, root: Path, depth: int, now: float, recent_seconds: int,
                          max_items: int, protect_dirs: List[str], protect_keywords: List[str],
                          size_cache: Dict[str, int], size_cache_lock: threading.Lock,
-                         target_release_gb: float = 0, active_titles: Optional[Set[str]] = None, recent_titles: Optional[Set[str]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         target_release_gb: float = 0, active_titles: Optional[Set[str]] = None,
+                         recent_titles: Optional[Set[str]] = None,
+                         stop_event: Optional[threading.Event] = None,
+                         shared_state: Optional[Dict[str, Any]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
         candidates: List[Dict[str, Any]] = []
@@ -151,6 +164,9 @@ class DiskSpaceScanner:
         
         try:
             for child in self._iter_candidate_items(root, depth):
+                if stop_event and stop_event.is_set():
+                    logger.info(f"提前停止扫描媒体根目录：{root}（已满足目标释放量）")
+                    break
                 diagnosis["items_scanned"] += 1
                 
                 if diagnosis["items_scanned"] > max_items:
@@ -217,39 +233,12 @@ class DiskSpaceScanner:
                     
                     age_days = max(0, int((now - stat.st_mtime) / 86400))
                     size_gb = size / 1024 ** 3
-                    tmdb_rating = self._get_tmdb_rating(child, stat.st_mtime)
-                    tmdb_modifier = 0.0
-                    tmdb_vote_average = None
-                    tmdb_vote_count = None
-                    tmdb_weighted_rating = None
-                    tmdb_title = None
-                    tmdb_id = None
-                    tmdb_type = None
-                    poster = None
-                    tmdb_reason = "未获取到 TMDB 评分"
-                    if tmdb_rating:
-                        tmdb_vote_average = tmdb_rating.get("vote_average")
-                        tmdb_vote_count = tmdb_rating.get("vote_count")
-                        tmdb_weighted_rating = tmdb_rating.get("weighted_rating")
-                        tmdb_title = tmdb_rating.get("title")
-                        tmdb_id = tmdb_rating.get("tmdb_id")
-                        tmdb_type = tmdb_rating.get("tmdb_type")
-                        poster = tmdb_rating.get("poster")
-                        tmdb_modifier = float(tmdb_rating.get("modifier") or 0)
-                        tmdb_reason = tmdb_rating.get("reason") or "TMDB 评分已参与排序"
-                        if tmdb_rating.get("used"):
-                            diagnosis["tmdb_rating_used"] += 1
-                        else:
-                            diagnosis["tmdb_rating_ignored"] += 1
-                    else:
-                        diagnosis["tmdb_rating_ignored"] += 1
-
                     recent_match_reason = self._match_recent_media(child, recent_titles)
                     recent_penalty = -20.0 if recent_match_reason else 0.0
 
                     score_detail = self._score_candidate(size_gb=size_gb, age_days=age_days,
                                                          target_release_gb=target_release_gb,
-                                                         tmdb_modifier=tmdb_modifier,
+                                                         tmdb_modifier=0,
                                                          inactive_score=recent_penalty)
                     score = score_detail["score"]
                     
@@ -261,27 +250,34 @@ class DiskSpaceScanner:
                         "age_days": age_days,
                         "mtime": stat.st_mtime,
                         "score": score,
+                        "base_score": score,
                         "space_score": score_detail["space_score"],
                         "age_score": score_detail["age_score"],
                         "inactive_score": score_detail["inactive_score"],
-                        "tmdb_modifier": tmdb_modifier,
-                        "tmdb_rating": tmdb_vote_average,
-                        "tmdb_weighted_rating": tmdb_weighted_rating,
-                        "tmdb_vote_count": tmdb_vote_count,
-                        "tmdb_title": tmdb_title,
-                        "tmdb_id": tmdb_id,
-                        "tmdb_type": tmdb_type,
-                        "poster": poster,
-                        "tmdb_reason": tmdb_reason,
+                        "tmdb_modifier": 0.0,
+                        "tmdb_rating": None,
+                        "tmdb_weighted_rating": None,
+                        "tmdb_vote_count": None,
+                        "tmdb_title": None,
+                        "tmdb_id": None,
+                        "tmdb_type": None,
+                        "poster": None,
+                        "tmdb_reason": "TMDB 延后到最终候选精排",
                         "type": "目录" if child.is_dir() else "文件",
                         "activity_reason": recent_match_reason or "未命中播放保护/最近播放降权",
                     })
                     logger.info(
                         f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
                         f"空间分={score_detail['space_score']:.2f}，时间分={score_detail['age_score']:.2f}，"
-                        f"低活跃分={score_detail['inactive_score']:.2f}，TMDB修正={tmdb_modifier:.2f}，"
-                        f"总分={score:.2f}，活跃度={recent_match_reason or '未命中'}，TMDB={tmdb_reason}"
+                        f"低活跃分={score_detail['inactive_score']:.2f}，TMDB修正=延后，"
+                        f"初筛分={score:.2f}，活跃度={recent_match_reason or '未命中'}"
                     )
+
+                    if stop_event and shared_state is not None:
+                        with shared_state["lock"]:
+                            shared_state["candidates"].append(candidates[-1])
+                            if self._should_early_stop(shared_state["candidates"], target_release_gb):
+                                stop_event.set()
                 except Exception as e:
                     diagnosis["error_skipped"] += 1
                     logger.warning(f"扫描候选失败 {child}: {e}")
@@ -470,6 +466,69 @@ class DiskSpaceScanner:
             for old_key, _ in sorted(cache.items(), key=lambda item: item[1].get("cache_time", 0))[:200]:
                 cache.pop(old_key, None)
         return value
+
+    def _apply_tmdb_rerank(self, candidates: List[Dict[str, Any]], diagnosis: Dict[str, Any]):
+        top_n = max(1, int(getattr(self._plugin, "_tmdb_top_n", 30) or 30))
+        if not candidates:
+            return
+        ranked = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        for item in ranked[:top_n]:
+            path_text = item.get("path")
+            if not path_text:
+                diagnosis["tmdb_rating_ignored"] += 1
+                continue
+            try:
+                tmdb_rating = self._get_tmdb_rating(Path(path_text), float(item.get("mtime") or 0))
+            except Exception:
+                tmdb_rating = None
+
+            tmdb_modifier = 0.0
+            tmdb_reason = "未获取到 TMDB 评分"
+            if tmdb_rating:
+                item["tmdb_rating"] = tmdb_rating.get("vote_average")
+                item["tmdb_vote_count"] = tmdb_rating.get("vote_count")
+                item["tmdb_weighted_rating"] = tmdb_rating.get("weighted_rating")
+                item["tmdb_title"] = tmdb_rating.get("title")
+                item["tmdb_id"] = tmdb_rating.get("tmdb_id")
+                item["tmdb_type"] = tmdb_rating.get("tmdb_type")
+                item["poster"] = tmdb_rating.get("poster")
+                tmdb_modifier = float(tmdb_rating.get("modifier") or 0)
+                tmdb_reason = tmdb_rating.get("reason") or "TMDB 评分已参与排序"
+                if tmdb_rating.get("used"):
+                    diagnosis["tmdb_rating_used"] += 1
+                else:
+                    diagnosis["tmdb_rating_ignored"] += 1
+            else:
+                diagnosis["tmdb_rating_ignored"] += 1
+
+            item["tmdb_modifier"] = tmdb_modifier
+            item["tmdb_reason"] = tmdb_reason
+            item["score"] = round(float(item.get("base_score") or item.get("score") or 0) + tmdb_modifier, 2)
+
+    def _should_early_stop(self, candidates: List[Dict[str, Any]], target_release_gb: float) -> bool:
+        needed = float(target_release_gb or 0)
+        if needed <= 0:
+            return False
+
+        # 保守早停：候选样本足够多，且当前高分候选已明显超过目标+冗余时才停止
+        min_sample = max(20, int(getattr(self._plugin, "_max_candidates", 30) or 30) * 2)
+        if len(candidates) < min_sample:
+            return False
+
+        ranked = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        selected = self._plugin._select_candidates(ranked, needed)
+        if not selected:
+            return False
+
+        selected_total = sum(float(item.get("size_gb") or 0) for item in selected)
+        margin_gb = max(10.0, needed * 0.2)
+        if selected_total < needed + margin_gb:
+            return False
+
+        # 还要确认当前已抓到的前列候选足够“密”，避免太早停掉后面更好的大项
+        top_bucket = ranked[:max(10, int(getattr(self._plugin, "_max_candidates", 30) or 30))]
+        top_bucket_total = sum(float(item.get("size_gb") or 0) for item in top_bucket)
+        return top_bucket_total >= needed + margin_gb
     
     def _iter_candidate_items(self, root: Path, depth: int):
         """智能扫描候选（使用迭代替代递归，避免递归深度限制）：
