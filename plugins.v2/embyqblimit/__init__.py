@@ -24,7 +24,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.5.1"
+    plugin_version = "2.5.2"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -435,10 +435,33 @@ class EmbyQBLimit(_PluginBase):
     def _can_apply_action(self, torrent: Dict[str, Any], action: str) -> bool:
         state = str(torrent.get("state") or "").lower()
         if action in {"qb_pause", "qb_pause_all"}:
-            return "pause" not in state and "paused" not in state
+            return self._is_downloading_state(state)
         if action in {"qb_resume", "qb_resume_all"}:
             return "pause" in state or "stopped" in state
         return False
+
+    @staticmethod
+    def _is_downloading_state(state: str) -> bool:
+        """仅识别需要暂停的下载态，避免把已完成/做种任务也暂停。"""
+        if not state:
+            return False
+        state = str(state).lower()
+        if "pause" in state or "paused" in state:
+            return False
+        download_states = {
+            "downloading",
+            "forceddl",
+            "forcedmetaDL".lower(),
+            "metaDL".lower(),
+            "queueddl",
+            "stalleddl",
+            "checkingdl",
+            "checkdl",
+            "allocating",
+        }
+        if state in download_states:
+            return True
+        return state.endswith("dl") or "downloading" in state
 
     def _operate_torrents(self, action: str, torrents: List[Dict[str, Any]]):
         service = self._get_downloader_service()
