@@ -24,7 +24,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.5.0"
+    plugin_version = "2.5.1"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -370,6 +370,25 @@ class EmbyQBLimit(_PluginBase):
         if isinstance(torrent, dict):
             return torrent.get(key)
         return getattr(torrent, key, None)
+
+    def _torrent_info(self, torrent: Any) -> Dict[str, Any]:
+        def get(key: str):
+            if isinstance(torrent, dict):
+                return torrent.get(key)
+            try:
+                return getattr(torrent, key)
+            except Exception:
+                return None
+
+        return {
+            "id": get("id") or get("hash") or get("hashString"),
+            "hash": get("hash") or get("hashString") or get("id"),
+            "name": get("name"),
+            "save_path": get("save_path") or get("downloadDir"),
+            "content_path": get("content_path"),
+            "root_path": get("root_path"),
+            "download_dir": get("downloadDir") or get("download_dir"),
+        }
 
     def _parse_command_indexes(self, args: Any = None, text: str = "") -> List[int]:
         raw = []
