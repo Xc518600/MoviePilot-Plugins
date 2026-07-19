@@ -5,6 +5,7 @@ Emby/Jellyfin/Plex 播放自动限速 MoviePilot 下载器插件
 """
 
 from datetime import datetime
+import math
 from typing import Any, Dict, List, Optional, Tuple
 import threading
 import time
@@ -23,7 +24,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.4.4"
+    plugin_version = "2.5.0"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -105,11 +106,70 @@ class EmbyQBLimit(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         """远程命令列表"""
-        return []
+        return [
+            {
+                "cmd": "/qb_tasks",
+                "event": EventType.PluginAction,
+                "desc": "查看 qBittorrent 任务列表",
+                "category": "下载器",
+                "data": {"action": "qb_tasks"}
+            },
+            {
+                "cmd": "/qb_pause",
+                "event": EventType.PluginAction,
+                "desc": "暂停指定 qBittorrent 任务，示例：/qb_pause 1",
+                "category": "下载器",
+                "data": {"action": "qb_pause"}
+            },
+            {
+                "cmd": "/qb_resume",
+                "event": EventType.PluginAction,
+                "desc": "恢复指定 qBittorrent 任务，示例：/qb_resume 1",
+                "category": "下载器",
+                "data": {"action": "qb_resume"}
+            },
+            {
+                "cmd": "/qb_pause_all",
+                "event": EventType.PluginAction,
+                "desc": "暂停全部下载中任务",
+                "category": "下载器",
+                "data": {"action": "qb_pause_all"}
+            },
+            {
+                "cmd": "/qb_resume_all",
+                "event": EventType.PluginAction,
+                "desc": "恢复全部已暂停任务",
+                "category": "下载器",
+                "data": {"action": "qb_resume_all"}
+            }
+        ]
 
     def get_api(self) -> List[Dict[str, Any]]:
         """插件 API 列表"""
         return []
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_plugin_action(self, event: Event = None):
+        """处理远程命令交互"""
+        if not event:
+            return
+        event_data = event.event_data or {}
+        if not isinstance(event_data, dict):
+            return
+        action = (event_data.get("action") or "").strip()
+        if action not in {"qb_tasks", "qb_pause", "qb_resume", "qb_pause_all", "qb_resume_all"}:
+            return
+
+        args = event_data.get("args") or event_data.get("arg") or ""
+        text = event_data.get("text") or ""
+        payload = self._handle_qb_command(action=action, args=args, text=text)
+        if not payload:
+            return
+        self.post_message(
+            mtype=getattr(NotificationType, self._notify_type, NotificationType.Plugin),
+            title=payload.get("title") or "Emby限速助手",
+            text=payload.get("text") or ""
+        )
 
     def stop_service(self):
         """停止服务"""
@@ -201,6 +261,278 @@ class EmbyQBLimit(_PluginBase):
         if not self._downloader:
             return None
         return DownloaderHelper().get_service(name=self._downloader)
+
+    def _handle_qb_command(self, action: str, args: Any = None, text: str = "") -> Dict[str, str]:
+        """处理 qB 任务命令"""
+        try:
+            if not self._downloader:
+                return {
+                    "title": "Emby限速助手 - 命令执行失败",
+                    "text": "当前插件未配置下载器，请先在插件设置里选择 qBittorrent 下载器。"
+                }
+
+            torrents = self._get_qb_torrents()
+            if action == "qb_tasks":
+                return {
+                    "title": "Emby限速助手 - qB任务列表",
+                    "text": self._format_torrent_list(torrents)
+                }
+
+            if action in {"qb_pause", "qb_resume"}:
+                indices = self._parse_command_indexes(args=args, text=text)
+                if not indices:
+                    cmd = "/qb_pause 1" if action == "qb_pause" else "/qb_resume 1"
+                    return {
+                        "title": "Emby限速助手 - 参数错误",
+                        "text": f"请提供任务编号，例如：{cmd}\n\n先发送 /qb_tasks 查看编号。"
+                    }
+                selected, invalid = self._pick_torrents_by_index(torrents, indices)
+                if not selected:
+                    return {
+                        "title": "Emby限速助手 - 未找到任务",
+                        "text": f"没有匹配到编号：{', '.join(str(i) for i in indices)}\n\n请先发送 /qb_tasks 查看当前编号。"
+                    }
+                changed, skipped = self._filter_torrents_for_action(selected, action)
+                if not changed:
+                    status_text = "都已经暂停" if action == "qb_pause" else "都已经在下载/排队"
+                    return {
+                        "title": "Emby限速助手 - 无需操作",
+                        "text": f"选中的任务{status_text}。\n\n{self._format_selected_torrents(selected, invalid=invalid, skipped=skipped)}"
+                    }
+                self._operate_torrents(action, changed)
+                verb = "已暂停" if action == "qb_pause" else "已恢复"
+                return {
+                    "title": f"Emby限速助手 - {verb}任务",
+                    "text": self._format_selected_torrents(changed, prefix=verb, invalid=invalid, skipped=skipped)
+                }
+
+            if action in {"qb_pause_all", "qb_resume_all"}:
+                changed, skipped = self._filter_torrents_for_action(torrents, action)
+                if not changed:
+                    status_text = "当前没有可暂停的下载中任务" if action == "qb_pause_all" else "当前没有可恢复的已暂停任务"
+                    return {
+                        "title": "Emby限速助手 - 无需操作",
+                        "text": status_text
+                    }
+                self._operate_torrents(action, changed)
+                verb = "已暂停全部下载中任务" if action == "qb_pause_all" else "已恢复全部已暂停任务"
+                lines = [verb, "", f"共处理 {len(changed)} 个任务："]
+                lines.extend([f"- {item.get('name')}" for item in changed[:20]])
+                if len(changed) > 20:
+                    lines.append(f"- ……其余 {len(changed) - 20} 个任务未展开")
+                if skipped:
+                    lines.append("")
+                    lines.append(f"跳过 {len(skipped)} 个当前状态不匹配的任务")
+                return {
+                    "title": f"Emby限速助手 - {verb}",
+                    "text": "\n".join(lines)
+                }
+        except Exception as e:
+            logger.error(f"处理 qB 命令失败: {e}")
+            return {
+                "title": "Emby限速助手 - 命令执行失败",
+                "text": str(e)
+            }
+        return {}
+
+    def _get_qb_torrents(self) -> List[Dict[str, Any]]:
+        """获取 qB 任务列表"""
+        service = self._get_downloader_service()
+        if not service or not service.instance:
+            raise RuntimeError(f"获取下载器失败：{self._downloader or '未配置'}")
+        instance = service.instance
+
+        torrents = []
+        if hasattr(instance, "get_torrents"):
+            data = instance.get_torrents()
+            torrents = data[0] if isinstance(data, tuple) else data
+        elif hasattr(instance, "qbc") and getattr(instance, "qbc", None):
+            torrents = instance.qbc.torrents_info()
+        else:
+            raise RuntimeError(f"下载器 {self._downloader} 不支持读取任务列表")
+
+        results = []
+        for idx, torrent in enumerate(torrents or [], start=1):
+            info = self._torrent_info(torrent)
+            info.update({
+                "index": idx,
+                "state": self._torrent_field(torrent, "state"),
+                "progress": self._torrent_field(torrent, "progress"),
+                "size": self._torrent_field(torrent, "size") or self._torrent_field(torrent, "total_size"),
+                "dlspeed": self._torrent_field(torrent, "dlspeed") or self._torrent_field(torrent, "dl_speed"),
+                "upspeed": self._torrent_field(torrent, "upspeed") or self._torrent_field(torrent, "up_speed"),
+            })
+            results.append(info)
+        return results
+
+    @staticmethod
+    def _torrent_field(torrent: Any, key: str):
+        if isinstance(torrent, dict):
+            return torrent.get(key)
+        return getattr(torrent, key, None)
+
+    def _parse_command_indexes(self, args: Any = None, text: str = "") -> List[int]:
+        raw = []
+        if args is not None:
+            if isinstance(args, list):
+                raw.extend([str(item) for item in args])
+            else:
+                raw.append(str(args))
+        if text:
+            raw.append(str(text))
+        merged = " ".join(raw).replace("，", " ").replace(",", " ")
+        indexes = []
+        for part in merged.split():
+            if part.startswith("/"):
+                continue
+            if part.isdigit():
+                value = int(part)
+                if value > 0 and value not in indexes:
+                    indexes.append(value)
+        return indexes
+
+    def _pick_torrents_by_index(self, torrents: List[Dict[str, Any]], indexes: List[int]) -> Tuple[List[Dict[str, Any]], List[int]]:
+        mapping = {item.get("index"): item for item in torrents}
+        selected = []
+        invalid = []
+        for idx in indexes:
+            item = mapping.get(idx)
+            if item:
+                selected.append(item)
+            else:
+                invalid.append(idx)
+        return selected, invalid
+
+    def _filter_torrents_for_action(self, torrents: List[Dict[str, Any]], action: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        changed = []
+        skipped = []
+        for item in torrents or []:
+            if self._can_apply_action(item, action):
+                changed.append(item)
+            else:
+                skipped.append(item)
+        return changed, skipped
+
+    def _can_apply_action(self, torrent: Dict[str, Any], action: str) -> bool:
+        state = str(torrent.get("state") or "").lower()
+        if action in {"qb_pause", "qb_pause_all"}:
+            return "pause" not in state and "paused" not in state
+        if action in {"qb_resume", "qb_resume_all"}:
+            return "pause" in state or "stopped" in state
+        return False
+
+    def _operate_torrents(self, action: str, torrents: List[Dict[str, Any]]):
+        service = self._get_downloader_service()
+        if not service or not service.instance:
+            raise RuntimeError(f"获取下载器失败：{self._downloader or '未配置'}")
+        instance = service.instance
+        ids = [item.get("hash") or item.get("id") for item in torrents if item.get("hash") or item.get("id")]
+        if not ids:
+            raise RuntimeError("没有可操作的任务 ID")
+
+        if action in {"qb_pause", "qb_pause_all"}:
+            if hasattr(instance, "stop_torrents"):
+                instance.stop_torrents(ids)
+            elif hasattr(instance, "pause_torrents"):
+                instance.pause_torrents(ids)
+            elif hasattr(instance, "qbc") and getattr(instance, "qbc", None):
+                instance.qbc.torrents_pause(torrent_hashes=ids)
+            else:
+                raise RuntimeError(f"下载器 {self._downloader} 不支持暂停任务")
+        elif action in {"qb_resume", "qb_resume_all"}:
+            if hasattr(instance, "start_torrents"):
+                instance.start_torrents(ids)
+            elif hasattr(instance, "resume_torrents"):
+                instance.resume_torrents(ids)
+            elif hasattr(instance, "qbc") and getattr(instance, "qbc", None):
+                instance.qbc.torrents_resume(torrent_hashes=ids)
+            else:
+                raise RuntimeError(f"下载器 {self._downloader} 不支持恢复任务")
+
+    def _format_torrent_list(self, torrents: List[Dict[str, Any]]) -> str:
+        if not torrents:
+            return "当前没有 qBittorrent 任务。"
+        lines = [f"下载器：{self._downloader}", f"当前共 {len(torrents)} 个任务", "", "可用命令：", "/qb_pause 编号", "/qb_resume 编号", "/qb_pause_all", "/qb_resume_all", "", "任务列表："]
+        for item in torrents[:30]:
+            progress = self._format_progress(item.get("progress"))
+            size = self._format_bytes(item.get("size"))
+            ds = self._format_speed(item.get("dlspeed"))
+            us = self._format_speed(item.get("upspeed"))
+            state = self._human_state(item.get("state"))
+            lines.append(f"{item.get('index')}. [{state}] {item.get('name')}")
+            lines.append(f"   进度：{progress}｜大小：{size}｜↓{ds} ↑{us}")
+        if len(torrents) > 30:
+            lines.append("")
+            lines.append(f"仅展示前 30 个任务，剩余 {len(torrents) - 30} 个未展开。")
+        return "\n".join(lines)
+
+    def _format_selected_torrents(self, torrents: List[Dict[str, Any]], prefix: str = "", invalid: Optional[List[int]] = None,
+                                  skipped: Optional[List[Dict[str, Any]]] = None) -> str:
+        lines = []
+        if prefix:
+            lines.append(prefix)
+            lines.append("")
+        lines.append(f"下载器：{self._downloader}")
+        lines.append(f"共 {len(torrents)} 个任务：")
+        for item in torrents[:20]:
+            lines.append(f"- #{item.get('index')} {item.get('name')}")
+        if len(torrents) > 20:
+            lines.append(f"- ……其余 {len(torrents) - 20} 个任务未展开")
+        if invalid:
+            lines.append("")
+            lines.append(f"无效编号：{', '.join(str(i) for i in invalid)}")
+        if skipped:
+            lines.append("")
+            lines.append(f"跳过 {len(skipped)} 个状态不匹配的任务")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_progress(value: Any) -> str:
+        try:
+            num = float(value or 0)
+            if num <= 1:
+                num *= 100
+            return f"{num:.1f}%"
+        except Exception:
+            return "0.0%"
+
+    @staticmethod
+    def _format_bytes(value: Any) -> str:
+        try:
+            num = float(value or 0)
+        except Exception:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while num >= 1024 and idx < len(units) - 1:
+            num /= 1024.0
+            idx += 1
+        return f"{num:.1f} {units[idx]}"
+
+    def _format_speed(self, value: Any) -> str:
+        return f"{self._format_bytes(value)}/s"
+
+    @staticmethod
+    def _human_state(state: Any) -> str:
+        raw = str(state or "")
+        lower = raw.lower()
+        if "paused" in lower or lower.startswith("pause"):
+            return "已暂停"
+        if "downloading" in lower or lower == "dl":
+            return "下载中"
+        if "uploading" in lower:
+            return "做种中"
+        if "stalled" in lower:
+            return "等待中"
+        if "queued" in lower:
+            return "排队中"
+        if "error" in lower or "missing" in lower:
+            return "错误"
+        if "checking" in lower:
+            return "校验中"
+        if "meta" in lower:
+            return "获取元数据"
+        return raw or "未知"
 
     def _get_media_server_config(self):
         """获取 MoviePilot 媒体服务器配置"""
