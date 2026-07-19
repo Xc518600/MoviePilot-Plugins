@@ -24,7 +24,7 @@ class EmbyQBLimit(_PluginBase):
     # 插件基本信息
     plugin_name = "Emby自动限速"
     plugin_desc = "监听媒体服务器真实播放会话，播放时自动限速，停止后恢复"
-    plugin_version = "2.5.2"
+    plugin_version = "2.5.3"
     plugin_author = "老公"
     plugin_description = "监听MoviePilot媒体服务器Webhook并查询真实播放会话，播放时自动限速已配置下载器，停止后恢复"
     plugin_icon = "play_circle_outline.png"
@@ -316,10 +316,7 @@ class EmbyQBLimit(_PluginBase):
                     }
                 self._operate_torrents(action, changed)
                 verb = "已暂停全部下载中任务" if action == "qb_pause_all" else "已恢复全部已暂停任务"
-                lines = [verb, "", f"共处理 {len(changed)} 个任务："]
-                lines.extend([f"- {item.get('name')}" for item in changed[:20]])
-                if len(changed) > 20:
-                    lines.append(f"- ……其余 {len(changed) - 20} 个任务未展开")
+                lines = [verb, "", f"共处理 {len(changed)} 个任务"]
                 if skipped:
                     lines.append("")
                     lines.append(f"跳过 {len(skipped)} 个当前状态不匹配的任务")
