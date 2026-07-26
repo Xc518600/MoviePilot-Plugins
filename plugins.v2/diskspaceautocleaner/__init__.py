@@ -19,9 +19,9 @@ from .notifier import DiskSpaceNotifier
 
 class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
-    plugin_desc = "监控指定硬盘剩余空间，空间不足时按路径映射扫描媒体库并生成清理建议。"
+    plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.4.0"
+    plugin_version = "3.5.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -153,7 +153,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             value = str(value or "").replace('，', ',').replace(';', ',')
             return [x.strip() for x in value.split(',') if x.strip()]
 
-        profiles: List[Dict[str, Any]] = []
+        profiles: List[Dict[str, str]] = []
         current: Dict[str, str] = {}
         for line in raw.split(chr(10)):
             stripped = line.strip()
@@ -171,10 +171,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         parsed: List[Dict[str, Any]] = []
         for idx, item in enumerate(profiles, start=1):
+            monitor_path = str(item.get('monitor_path') or '').strip()
+            monitor_paths = split_list(item.get('monitor_paths', ''))
+            if monitor_path and monitor_path not in monitor_paths:
+                monitor_paths = [monitor_path, *monitor_paths]
+            media_paths = split_list(item.get('media_paths', ''))
             parsed.append({
                 'name': item.get('name') or f'策略{idx}',
-                'monitor_paths': split_list(item.get('monitor_paths', '')),
-                'media_paths': split_list(item.get('media_paths', '')),
+                'monitor_path': monitor_paths[0] if monitor_paths else '',
+                'monitor_paths': monitor_paths,
+                'media_paths': media_paths,
                 'min_free_gb': DiskSpaceUtils.to_int(item.get('min_free_gb'), self._min_free_gb),
                 'target_free_gb': DiskSpaceUtils.to_int(item.get('target_free_gb'), self._target_free_gb),
                 'recent_days_protect': DiskSpaceUtils.to_int(item.get('recent_days_protect'), self._recent_days_protect),
@@ -196,20 +202,26 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def _get_effective_monitor_paths(self) -> List[str]:
         result: List[str] = []
-        for item in DiskSpaceUtils.lines(self._monitor_paths):
-            if item not in result:
-                result.append(item)
-        for strategy in self._parse_strategy_profiles():
+        strategies = self._parse_strategy_profiles()
+        for strategy in strategies:
+            monitor_path = str(strategy.get('monitor_path') or '').strip()
+            if monitor_path and monitor_path not in result:
+                result.append(monitor_path)
             for item in strategy.get('monitor_paths') or []:
                 if item not in result:
                     result.append(item)
+        for item in DiskSpaceUtils.lines(self._monitor_paths):
+            if item not in result:
+                result.append(item)
         return result
 
     def _build_default_strategy(self, monitor_path: Optional[Path] = None) -> Dict[str, Any]:
         name = monitor_path.as_posix() if monitor_path else '默认策略'
+        monitor_path_text = monitor_path.as_posix() if monitor_path else ''
         return {
             'name': name,
-            'monitor_paths': [monitor_path.as_posix()] if monitor_path else [],
+            'monitor_path': monitor_path_text,
+            'monitor_paths': [monitor_path_text] if monitor_path_text else [],
             'media_paths': DiskSpaceUtils.lines(self._media_paths),
             'min_free_gb': self._min_free_gb,
             'target_free_gb': self._target_free_gb,
@@ -239,6 +251,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     if monitor_resolved == sp or DiskSpaceUtils.is_relative_to(monitor_resolved, sp):
                         merged = dict(base)
                         merged.update(strategy)
+                        merged['monitor_path'] = strategy.get('monitor_path') or (strategy.get('monitor_paths') or base.get('monitor_paths') or [''])[0]
                         merged['monitor_paths'] = strategy.get('monitor_paths') or base.get('monitor_paths')
                         merged['media_paths'] = strategy.get('media_paths') or base.get('media_paths')
                         return merged
@@ -296,16 +309,19 @@ class DiskSpaceAutoCleaner(_PluginBase):
         for idx in range(1, 4):
             prefix = f"strategy_{idx}_"
             name = str(config.get(prefix + "name") or "").strip()
-            monitor_paths = norm_csv(config.get(prefix + "monitor_paths"))
+            monitor_path = str(config.get(prefix + "monitor_path") or "").strip()
             media_paths = norm_csv(config.get(prefix + "media_paths"))
-            if not name and not monitor_paths and not media_paths:
+            if not name and not monitor_path and not media_paths:
                 continue
             lines = [f"name={name or f'策略{idx}'}"]
-            for key in ["monitor_paths", "media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n"]:
+            if monitor_path:
+                lines.append(f"monitor_path={monitor_path}")
+                lines.append(f"monitor_paths={monitor_path}")
+            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n"]:
                 value = config.get(prefix + key)
                 if value is None or str(value).strip() == "":
                     continue
-                if key in {"monitor_paths", "media_paths"}:
+                if key == "media_paths":
                     value = norm_csv(value)
                 lines.append(f"{key}={value}")
             active_play = config.get(prefix + "active_play_protect")
@@ -331,7 +347,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         for idx in range(3):
             base = {
                 "name": templates[idx]["name"],
-                "monitor_paths": "",
+                "monitor_path": "",
                 "media_paths": "",
                 "min_free_gb": self._min_free_gb,
                 "target_free_gb": self._target_free_gb,
@@ -350,7 +366,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 item = parsed[idx]
                 base.update({
                     "name": item.get("name") or base["name"],
-                    "monitor_paths": "\n".join(item.get("monitor_paths") or []),
+                    "monitor_path": item.get("monitor_path") or "",
                     "media_paths": "\n".join(item.get("media_paths") or []),
                     "min_free_gb": item.get("min_free_gb", base["min_free_gb"]),
                     "target_free_gb": item.get("target_free_gb", base["target_free_gb"]),
@@ -387,8 +403,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "name", "label": "策略名称", "placeholder": strategy.get("name") or f"策略{idx}"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSelect", "props": {"model": prefix + "media_server", "label": "媒体服务器", "items": mediaserver_items, "hint": "直接选择 MoviePilot 已配置媒体服务器", "persistent-hint": True}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": prefix + "active_play_protect", "label": "正在播放保护"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "monitor_paths", "label": "监控路径", "rows": 2, "placeholder": "/硬盘3", "hint": "每行一个；命中这些盘时启用本策略"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "media_paths", "label": "媒体扫描路径", "rows": 2, "placeholder": "/link3/外语电影", "hint": "每行一个；只扫描这些路径"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": prefix + "monitor_path", "label": "监控盘路径", "placeholder": "/硬盘3", "hint": "一盘一个策略；填写这张卡对应的唯一监控路径", "persistent-hint": True}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "media_paths", "label": "媒体扫描路径", "rows": 2, "placeholder": "/link3/外语电影", "hint": "每行一个；只扫描这块盘对应的媒体路径"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "min_free_gb", "label": "触发剩余GB", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "target_free_gb", "label": "目标剩余GB", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_days_protect", "label": "最近新增保护天数", "type": "number"}}]},
@@ -471,111 +487,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后立即运行一次", "hint": "打开后保存配置，会立刻执行一次检查并自动关闭"}}]
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {"model": "active_play_protect", "label": "正在播放保护", "hint": "启用后，当前正在 Emby/Jellyfin/Plex 播放的媒体不会进入删除候选"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控硬盘/挂载路径", "rows": 3, "placeholder": "/media\n/硬盘1", "hint": "用于检查剩余空间，每行一个路径"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "media_paths", "label": "默认媒体扫描路径", "rows": 4, "placeholder": "/media/电影\n/media/电视剧", "hint": "没有匹配到路径映射时，才扫描这些默认目录"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "path_mappings", "label": "硬盘路径到媒体库路径映射", "rows": 4, "placeholder": "/硬盘5=>/link5\n/vol5=>/link5", "hint": "当某个监控硬盘空间不足时，只扫描它对应的媒体库存放路径。格式：监控路径=>媒体库路径，每行一个。例：硬盘5 对应 link5"}}]
-                            },
                             *strategy_cards,
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSelect", "props": {"model": "media_server", "label": "媒体服务器", "items": mediaserver_items, "hint": "直接选择 MoviePilot 已配置的媒体服务器；未选择则不启用播放保护/最近播放降权", "persistent-hint": True}}]
+                                "props": {"cols": 12},
+                                "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "已改为一盘一个策略：每张卡只配置一块盘和它对应的媒体路径。旧版全局监控路径、默认扫描路径、路径映射仍兼容读取，但不再作为主配置入口。"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "recent_play_days", "label": "最近播放降权天数", "type": "number", "placeholder": "7", "hint": "大于0时，命中最近播放记录的媒体会降低删除优先级；0 表示关闭"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "min_free_gb", "label": "触发剩余空间GB", "type": "number", "placeholder": "5"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "target_free_gb", "label": "目标剩余空间GB", "type": "number", "placeholder": "30"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
                                 "content": [{"component": "VTextField", "props": {"model": "scan_interval_minutes", "label": "检查间隔分钟", "type": "number", "placeholder": "60"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "scan_cooldown_minutes", "label": "扫描冷却分钟", "type": "number", "placeholder": "360", "hint": "持续低空间时，两次候选扫描的最短间隔"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "recent_days_protect", "label": "最近新增保护天数", "type": "number", "placeholder": "30"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "placeholder": "2"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{"component": "VTextField", "props": {"model": "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number", "placeholder": "1440"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "max_candidates", "label": "最多候选数量", "type": "number", "placeholder": "30"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "max_scan_items", "label": "最大扫描条目", "type": "number", "placeholder": "5000"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "candidate_depth", "label": "候选扫描深度", "type": "number", "placeholder": "2", "hint": "默认2层，可识别 /link5/电影/电影A；填1只扫描根目录第一层"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "placeholder": "30", "hint": "只对前 N 个初筛候选做 TMDB 评分修正，减少扫描期重处理"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "max_delete_gb", "label": "每次删除最大空间GB", "type": "number", "placeholder": "1000", "hint": "单次清理最多删除多少GB；只按完整电影/完整电视剧目录删除，不拆分单集/单季。0 表示不限制"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "history_limit", "label": "历史记录保留条数", "type": "number", "placeholder": "50"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "protect_dirs", "label": "保护目录", "rows": 3, "placeholder": "/media/电影/收藏\n/media/电视剧/保留", "hint": "路径命中这些目录时不会进入候选"}}]
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [{"component": "VTextarea", "props": {"model": "protect_keywords", "label": "保护关键词", "rows": 3, "placeholder": "收藏\n周杰伦\n宫崎骏", "hint": "路径或文件名包含关键词时不会进入候选"}}]
                             },
                         ]
                     }
@@ -586,32 +512,13 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "dry_run": self._dry_run,
             "notify": self._notify,
             "run_once": False,
-            "monitor_paths": self._monitor_paths,
-            "media_paths": self._media_paths,
-            "path_mappings": self._path_mappings,
-            "min_free_gb": self._min_free_gb,
-            "target_free_gb": self._target_free_gb,
             "scan_interval_minutes": self._scan_interval_minutes,
-            "scan_cooldown_minutes": self._scan_cooldown_minutes,
-            "scan_backoff_multiplier": self._scan_backoff_multiplier,
-            "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
-            "max_candidates": self._max_candidates,
-            "max_scan_items": self._max_scan_items,
-            "candidate_depth": self._candidate_depth,
-            "tmdb_top_n": self._tmdb_top_n,
-            "recent_days_protect": self._recent_days_protect,
-            "protect_dirs": self._protect_dirs,
-            "protect_keywords": self._protect_keywords,
             "history_limit": self._history_limit,
-            "max_delete_gb": self._max_delete_gb,
             "history": self._history,
             "scan_state": self._scan_state,
-            "media_server": default_media_server,
-            "active_play_protect": self._active_play_protect,
-            "recent_play_days": self._recent_play_days,
             "strategy_profiles": self._strategy_profiles,
             "strategy_1_name": strategy_defaults[0]["name"],
-            "strategy_1_monitor_paths": strategy_defaults[0]["monitor_paths"],
+            "strategy_1_monitor_path": strategy_defaults[0]["monitor_path"],
             "strategy_1_media_paths": strategy_defaults[0]["media_paths"],
             "strategy_1_min_free_gb": strategy_defaults[0]["min_free_gb"],
             "strategy_1_target_free_gb": strategy_defaults[0]["target_free_gb"],
@@ -626,7 +533,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "strategy_1_active_play_protect": strategy_defaults[0]["active_play_protect"],
             "strategy_1_protect_keywords": strategy_defaults[0]["protect_keywords"],
             "strategy_2_name": strategy_defaults[1]["name"],
-            "strategy_2_monitor_paths": strategy_defaults[1]["monitor_paths"],
+            "strategy_2_monitor_path": strategy_defaults[1]["monitor_path"],
             "strategy_2_media_paths": strategy_defaults[1]["media_paths"],
             "strategy_2_min_free_gb": strategy_defaults[1]["min_free_gb"],
             "strategy_2_target_free_gb": strategy_defaults[1]["target_free_gb"],
@@ -641,7 +548,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "strategy_2_active_play_protect": strategy_defaults[1]["active_play_protect"],
             "strategy_2_protect_keywords": strategy_defaults[1]["protect_keywords"],
             "strategy_3_name": strategy_defaults[2]["name"],
-            "strategy_3_monitor_paths": strategy_defaults[2]["monitor_paths"],
+            "strategy_3_monitor_path": strategy_defaults[2]["monitor_path"],
             "strategy_3_media_paths": strategy_defaults[2]["media_paths"],
             "strategy_3_min_free_gb": strategy_defaults[2]["min_free_gb"],
             "strategy_3_target_free_gb": strategy_defaults[2]["target_free_gb"],

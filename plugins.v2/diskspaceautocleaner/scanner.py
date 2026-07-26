@@ -597,13 +597,34 @@ class DiskSpaceScanner:
                     stack.append((child, level + 1))
     
     def _media_paths_for_monitor(self, monitor_path: Path) -> List[str]:
-        """根据路径映射，推断当前监控硬盘对应的媒体扫描路径（线程安全）。"""
-        # 线程安全地读取配置
+        """按单盘策略优先获取当前监控路径对应的媒体路径，旧 path_mappings 仅作兼容回退。"""
+        monitor_resolved = monitor_path.resolve(strict=False)
+
+        # 1. 优先按一盘一个策略解析
+        try:
+            strategies = self._plugin._parse_strategy_profiles()
+        except Exception:
+            strategies = []
+        for strategy in strategies:
+            monitor_text = str(strategy.get("monitor_path") or "").strip()
+            if not monitor_text:
+                monitor_paths = strategy.get("monitor_paths") or []
+                monitor_text = str(monitor_paths[0]).strip() if monitor_paths else ""
+            if not monitor_text:
+                continue
+            try:
+                strategy_monitor = Path(monitor_text).resolve(strict=False)
+                if monitor_resolved == strategy_monitor or DiskSpaceUtils.is_relative_to(monitor_resolved, strategy_monitor):
+                    media_paths = [x for x in (strategy.get("media_paths") or []) if str(x).strip()]
+                    if media_paths:
+                        return media_paths
+            except Exception:
+                continue
+
+        # 2. 兼容旧 path_mappings
         with self._lock:
             path_mappings = self._plugin._path_mappings
             media_paths = self._plugin._media_paths
-        
-        # 1. 尝试通过 path_mappings 精确匹配监控路径
         for line in DiskSpaceUtils.lines(path_mappings):
             if '=>' not in line:
                 continue
@@ -611,13 +632,13 @@ class DiskSpaceScanner:
             if not src or not dst:
                 continue
             try:
-                src_path = Path(src)
-                dst_path = Path(dst)
-                monitor_resolved = monitor_path.resolve(strict=False)
-                src_resolved = src_path.resolve(strict=False)
+                src_resolved = Path(src).resolve(strict=False)
                 if monitor_resolved == src_resolved or DiskSpaceUtils.is_relative_to(monitor_resolved, src_resolved):
-                    return [x.strip() for x in dst.split(",") if x.strip()]
+                    mapped_paths = [x.strip() for x in dst.split(",") if x.strip()]
+                    if mapped_paths:
+                        return mapped_paths
             except Exception:
                 continue
-        # 2. 没有匹配到映射，使用默认媒体路径
+
+        # 3. 最后回退到旧默认媒体路径
         return DiskSpaceUtils.lines(media_paths)
