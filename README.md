@@ -6,6 +6,7 @@
 
 - Emby自动限速 (`EmbyQBLimit`)
 - Emby删除兜底清理 (`EmbyDeleteGuard`)
+- 硬盘空间自动清理 (`DiskSpaceAutoCleaner`)
 
 仓库地址：
 
