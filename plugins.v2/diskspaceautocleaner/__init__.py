@@ -18,10 +18,11 @@ from .notifier import DiskSpaceNotifier
 
 
 class DiskSpaceAutoCleaner(_PluginBase):
+    _max_strategy_slots = 8
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.5.0"
+    plugin_version = "3.6.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -298,15 +299,18 @@ class DiskSpaceAutoCleaner(_PluginBase):
             return "\n".join([x.strip() for x in str(value or "").replace("\r\n", "\n").split("\n") if x.strip()])
 
         def norm_csv(value: Any) -> str:
+            text = str(value or "").replace("\r\n", "\n")
+            if "\n" in text:
+                return ",".join([x.strip() for x in text.split("\n") if x.strip()])
             parts = []
-            for raw in str(value or "").replace("，", ",").replace(";", ",").split(","):
+            for raw in text.replace("，", ",").replace(";", ",").split(","):
                 raw = raw.strip()
                 if raw:
                     parts.append(raw)
             return ",".join(parts)
 
         blocks: List[str] = []
-        for idx in range(1, 4):
+        for idx in range(1, self._max_strategy_slots + 1):
             prefix = f"strategy_{idx}_"
             name = str(config.get(prefix + "name") or "").strip()
             monitor_path = str(config.get(prefix + "monitor_path") or "").strip()
@@ -327,7 +331,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             active_play = config.get(prefix + "active_play_protect")
             if active_play is not None:
                 lines.append(f"active_play_protect={'true' if DiskSpaceUtils.to_bool(active_play, True) else 'false'}")
-            protect_keywords = norm_csv(config.get(prefix + "protect_keywords"))
+            protect_keywords = norm_lines(config.get(prefix + "protect_keywords")).replace(chr(10), ',')
             if protect_keywords:
                 lines.append(f"protect_keywords={protect_keywords}")
             protect_dirs = norm_lines(config.get(prefix + "protect_dirs"))
@@ -343,17 +347,24 @@ class DiskSpaceAutoCleaner(_PluginBase):
             {"name": "硬盘5-欧美电视剧", "recent_days_protect": 25, "recent_play_days": 15, "max_delete_gb": 90},
         ]
         parsed = self._parse_strategy_profiles()
+        slot_count = max(3, min(self._max_strategy_slots, len(parsed) + 1))
         results: List[Dict[str, Any]] = []
-        for idx in range(3):
+        for idx in range(slot_count):
+            template = templates[idx] if idx < len(templates) else {
+                "name": f"策略{idx + 1}",
+                "recent_days_protect": self._recent_days_protect,
+                "recent_play_days": self._recent_play_days,
+                "max_delete_gb": self._max_delete_gb,
+            }
             base = {
-                "name": templates[idx]["name"],
+                "name": template["name"],
                 "monitor_path": "",
                 "media_paths": "",
                 "min_free_gb": self._min_free_gb,
                 "target_free_gb": self._target_free_gb,
-                "recent_days_protect": templates[idx]["recent_days_protect"],
-                "recent_play_days": templates[idx]["recent_play_days"],
-                "max_delete_gb": templates[idx]["max_delete_gb"],
+                "recent_days_protect": template["recent_days_protect"],
+                "recent_play_days": template["recent_play_days"],
+                "max_delete_gb": template["max_delete_gb"],
                 "scan_cooldown_minutes": self._scan_cooldown_minutes,
                 "scan_backoff_multiplier": self._scan_backoff_multiplier,
                 "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
@@ -396,7 +407,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "props": {"variant": "outlined", "class": "mb-2"},
                     "content": [
                         {"component": "VCardTitle", "text": f"策略{idx}配置"},
-                        {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "每张卡片对应一个硬盘策略；留空则该策略不生效。"},
+                        {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "每张卡片对应一块硬盘和它的媒体路径；监控盘路径为空时，该策略不生效。"},
                         {
                             "component": "VRow",
                             "content": [
@@ -414,7 +425,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "hint": "连续低空间时，扫描冷却会按倍率递增"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "hint": "只对前 N 个初筛候选做 TMDB 评分修正"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [{"component": "VTextarea", "props": {"model": prefix + "protect_keywords", "label": "保护关键词", "rows": 2, "placeholder": "收藏\n经典\n在追", "hint": "每行一个；命中即跳过"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_candidates", "label": "最多候选数量", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_scan_items", "label": "最大扫描条目", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "candidate_depth", "label": "候选扫描深度", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "protect_dirs", "label": "保护目录", "rows": 2, "placeholder": "/link4/国产剧/保留", "hint": "每行一个；命中这些目录时跳过"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextarea", "props": {"model": prefix + "protect_keywords", "label": "保护关键词", "rows": 2, "placeholder": "收藏\n经典\n在追", "hint": "每行一个；命中即跳过"}}]},
                             ]
                         }
                     ]
@@ -491,7 +506,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12},
-                                "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "已改为一盘一个策略：每张卡只配置一块盘和它对应的媒体路径。旧版全局监控路径、默认扫描路径、路径映射仍兼容读取，但不再作为主配置入口。"}}]
+                                "content": [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "已改为一盘一个策略：每张卡只配置一块盘和它对应的媒体路径。当前界面最多展示 8 个策略位；旧版全局监控路径、默认扫描路径、路径映射仅作兼容读取，不再作为主配置入口。"}}]
                             },
                             {
                                 "component": "VCol",
@@ -507,7 +522,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     }
                 ]
             }
-        ], {
+        ], self._build_form_data(strategy_defaults)
+
+    def _build_form_data(self, strategy_defaults: List[Dict[str, Any]]) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "enabled": self._enabled,
             "dry_run": self._dry_run,
             "notify": self._notify,
@@ -517,53 +535,30 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "history": self._history,
             "scan_state": self._scan_state,
             "strategy_profiles": self._strategy_profiles,
-            "strategy_1_name": strategy_defaults[0]["name"],
-            "strategy_1_monitor_path": strategy_defaults[0]["monitor_path"],
-            "strategy_1_media_paths": strategy_defaults[0]["media_paths"],
-            "strategy_1_min_free_gb": strategy_defaults[0]["min_free_gb"],
-            "strategy_1_target_free_gb": strategy_defaults[0]["target_free_gb"],
-            "strategy_1_recent_days_protect": strategy_defaults[0]["recent_days_protect"],
-            "strategy_1_recent_play_days": strategy_defaults[0]["recent_play_days"],
-            "strategy_1_max_delete_gb": strategy_defaults[0]["max_delete_gb"],
-            "strategy_1_scan_cooldown_minutes": strategy_defaults[0]["scan_cooldown_minutes"],
-            "strategy_1_scan_backoff_multiplier": strategy_defaults[0]["scan_backoff_multiplier"],
-            "strategy_1_scan_backoff_max_minutes": strategy_defaults[0]["scan_backoff_max_minutes"],
-            "strategy_1_tmdb_top_n": strategy_defaults[0]["tmdb_top_n"],
-            "strategy_1_media_server": strategy_defaults[0]["media_server"],
-            "strategy_1_active_play_protect": strategy_defaults[0]["active_play_protect"],
-            "strategy_1_protect_keywords": strategy_defaults[0]["protect_keywords"],
-            "strategy_2_name": strategy_defaults[1]["name"],
-            "strategy_2_monitor_path": strategy_defaults[1]["monitor_path"],
-            "strategy_2_media_paths": strategy_defaults[1]["media_paths"],
-            "strategy_2_min_free_gb": strategy_defaults[1]["min_free_gb"],
-            "strategy_2_target_free_gb": strategy_defaults[1]["target_free_gb"],
-            "strategy_2_recent_days_protect": strategy_defaults[1]["recent_days_protect"],
-            "strategy_2_recent_play_days": strategy_defaults[1]["recent_play_days"],
-            "strategy_2_max_delete_gb": strategy_defaults[1]["max_delete_gb"],
-            "strategy_2_scan_cooldown_minutes": strategy_defaults[1]["scan_cooldown_minutes"],
-            "strategy_2_scan_backoff_multiplier": strategy_defaults[1]["scan_backoff_multiplier"],
-            "strategy_2_scan_backoff_max_minutes": strategy_defaults[1]["scan_backoff_max_minutes"],
-            "strategy_2_tmdb_top_n": strategy_defaults[1]["tmdb_top_n"],
-            "strategy_2_media_server": strategy_defaults[1]["media_server"],
-            "strategy_2_active_play_protect": strategy_defaults[1]["active_play_protect"],
-            "strategy_2_protect_keywords": strategy_defaults[1]["protect_keywords"],
-            "strategy_3_name": strategy_defaults[2]["name"],
-            "strategy_3_monitor_path": strategy_defaults[2]["monitor_path"],
-            "strategy_3_media_paths": strategy_defaults[2]["media_paths"],
-            "strategy_3_min_free_gb": strategy_defaults[2]["min_free_gb"],
-            "strategy_3_target_free_gb": strategy_defaults[2]["target_free_gb"],
-            "strategy_3_recent_days_protect": strategy_defaults[2]["recent_days_protect"],
-            "strategy_3_recent_play_days": strategy_defaults[2]["recent_play_days"],
-            "strategy_3_max_delete_gb": strategy_defaults[2]["max_delete_gb"],
-            "strategy_3_scan_cooldown_minutes": strategy_defaults[2]["scan_cooldown_minutes"],
-            "strategy_3_scan_backoff_multiplier": strategy_defaults[2]["scan_backoff_multiplier"],
-            "strategy_3_scan_backoff_max_minutes": strategy_defaults[2]["scan_backoff_max_minutes"],
-            "strategy_3_tmdb_top_n": strategy_defaults[2]["tmdb_top_n"],
-            "strategy_3_media_server": strategy_defaults[2]["media_server"],
-            "strategy_3_active_play_protect": strategy_defaults[2]["active_play_protect"],
-            "strategy_3_protect_keywords": strategy_defaults[2]["protect_keywords"],
             "sources": "immediate",
         }
+        for idx, strategy in enumerate(strategy_defaults, start=1):
+            prefix = f"strategy_{idx}_"
+            data[prefix + "name"] = strategy.get("name") or f"策略{idx}"
+            data[prefix + "monitor_path"] = strategy.get("monitor_path") or ""
+            data[prefix + "media_paths"] = strategy.get("media_paths") or ""
+            data[prefix + "min_free_gb"] = strategy.get("min_free_gb", self._min_free_gb)
+            data[prefix + "target_free_gb"] = strategy.get("target_free_gb", self._target_free_gb)
+            data[prefix + "recent_days_protect"] = strategy.get("recent_days_protect", self._recent_days_protect)
+            data[prefix + "recent_play_days"] = strategy.get("recent_play_days", self._recent_play_days)
+            data[prefix + "max_delete_gb"] = strategy.get("max_delete_gb", self._max_delete_gb)
+            data[prefix + "scan_cooldown_minutes"] = strategy.get("scan_cooldown_minutes", self._scan_cooldown_minutes)
+            data[prefix + "scan_backoff_multiplier"] = strategy.get("scan_backoff_multiplier", self._scan_backoff_multiplier)
+            data[prefix + "scan_backoff_max_minutes"] = strategy.get("scan_backoff_max_minutes", self._scan_backoff_max_minutes)
+            data[prefix + "tmdb_top_n"] = strategy.get("tmdb_top_n", self._tmdb_top_n)
+            data[prefix + "media_server"] = strategy.get("media_server") or ""
+            data[prefix + "active_play_protect"] = strategy.get("active_play_protect", self._active_play_protect)
+            data[prefix + "protect_keywords"] = strategy.get("protect_keywords") or ""
+            data[prefix + "protect_dirs"] = strategy.get("protect_dirs") or ""
+            data[prefix + "max_candidates"] = strategy.get("max_candidates", self._max_candidates)
+            data[prefix + "max_scan_items"] = strategy.get("max_scan_items", self._max_scan_items)
+            data[prefix + "candidate_depth"] = strategy.get("candidate_depth", self._candidate_depth)
+        return data
 
     def get_page(self) -> List[dict]:
         history = list(self._history or [])[: self._history_limit]
