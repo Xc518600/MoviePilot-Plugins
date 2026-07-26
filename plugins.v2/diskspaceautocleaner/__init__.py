@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.7.0"
+    plugin_version = "3.8.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -620,13 +620,31 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         merged_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
 
-        page: List[dict] = [self._build_strategy_overview_panel(overview_items)]
+        page: List[dict] = []
         if merged_candidates:
+            page.append(self._build_filter_hint_panel(overview_items))
             page.append(self._build_latest_candidates_panel(
                 merged_candidates,
-                title="待删除候选媒体海报墙",
+                title="全局待删除候选海报墙",
                 subtitle="优先展示当前仍存在的候选媒体海报；按删除优先级从高到低排序。"
             ))
+            for item in latest_by_strategy:
+                strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
+                candidates = self._filter_existing_candidates(item.get("all_candidates") or item.get("candidates") or [])
+                if not candidates:
+                    continue
+                enriched_candidates: List[Dict[str, Any]] = []
+                for candidate in sorted(candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
+                    enriched = dict(candidate)
+                    enriched["strategy_name"] = strategy_name
+                    enriched["record_time"] = item.get("time") or "-"
+                    enriched["monitor_path"] = item.get("monitor_path") or "-"
+                    enriched_candidates.append(enriched)
+                page.append(self._build_latest_candidates_panel(
+                    enriched_candidates,
+                    title=f"{strategy_name} · 候选海报",
+                    subtitle=f"监控盘：{item.get('monitor_path') or '-'}｜最近记录：{item.get('time') or '-'}"
+                ))
         else:
             page.append({
                 "component": "VAlert",
@@ -646,41 +664,21 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 continue
         return result
 
-    def _build_strategy_overview_panel(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not items:
-            return {
-                "component": "VAlert",
-                "props": {"type": "warning", "variant": "tonal", "text": "暂无可展示的策略摘要。建议点击立即运行检查刷新。"}
-            }
+    def _build_filter_hint_panel(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        chips = []
+        for item in items:
+            chips.append({
+                "component": "VChip",
+                "props": {"size": "small", "variant": "tonal", "color": "primary", "class": "ma-1"},
+                "text": f"{item.get('strategy_name') or '-'} · {item.get('candidate_count', 0)}项"
+            })
         return {
             "component": "VCard",
             "props": {"class": "mb-4"},
             "content": [
-                {"component": "VCardTitle", "text": "多盘策略摘要"},
-                {
-                    "component": "VCardText",
-                    "props": {"class": "pt-0 text-caption"},
-                    "text": "这里只保留每块盘的摘要信息；具体硬盘诊断详情已从主页面弱化，主视图优先展示待删除候选媒体海报。"
-                },
-                {
-                    "component": "div",
-                    "props": {"class": "grid gap-3 p-4"},
-                    "content": [
-                        {
-                            "component": "VCard",
-                            "props": {"variant": "outlined"},
-                            "content": [
-                                {"component": "VCardTitle", "props": {"class": "py-2 text-subtitle-1"}, "text": x.get("strategy_name") or "默认策略"},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"监控路径：{x.get('monitor_path') or '-'}"},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"剩余空间：{x.get('free_text') or '-'}"},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"现存候选：{x.get('candidate_count', 0)} 项"},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"摘要：{x.get('summary') or '-'}"},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"记录时间：{x.get('time') or '-'}"},
-                            ]
-                        }
-                        for x in items
-                    ]
-                }
+                {"component": "VCardTitle", "text": "按策略查看候选"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "当前宿主页面先用分区方式代替交互筛选：上方是全局候选海报墙，下方按每块盘/每个策略分别展示，方便你快速对比。"},
+                {"component": "div", "props": {"class": "px-4 pb-4 d-flex flex-wrap"}, "content": chips}
             ]
         }
 
@@ -745,7 +743,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         tmdb_id = item.get("tmdb_id")
         tmdb_type = item.get("tmdb_type") or "movie"
         href = f"https://www.themoviedb.org/{tmdb_type}/{tmdb_id}" if tmdb_id else "#"
-        rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
+        rank_text = "🥇 当前最优先删除" if rank == 1 else ("🔥 高优先级" if rank <= 3 else f"#{rank}")
 
         activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
         summary_lines = [
@@ -758,6 +756,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             {"label": f"评分 {score:.2f}", "color": "primary"},
             {"label": f"{float(item.get('size_gb') or 0):.2f}GB", "color": "warning"},
             {"label": f"{item.get('age_days') or 0}天", "color": "secondary"},
+            {"label": rank_text, "color": "error" if rank == 1 else ("deep-orange" if rank <= 3 else "info")},
         ]
         if tmdb_rating is not None:
             meta_chips.append({"label": f"TMDB {tmdb_rating}", "color": "success"})
@@ -778,7 +777,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                     "component": "VImg",
                                     "props": {
                                         "src": poster_src,
-                                        "height": 220,
+                                        "height": 260,
                                         "cover": True,
                                         "class": "object-cover",
                                     }
