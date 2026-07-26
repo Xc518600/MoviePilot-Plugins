@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.6.0"
+    plugin_version = "3.7.0"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -566,7 +566,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             return [
                 {
                     "component": "VAlert",
-                    "props": {"type": "info", "variant": "tonal", "text": "暂无硬盘空间检查记录。启用插件后会按间隔检查并生成建议。"}
+                    "props": {"type": "info", "variant": "tonal", "text": "暂无硬盘空间检查记录。启用插件后会按间隔检查并生成候选媒体海报。"}
                 },
                 {
                     "component": "VCard",
@@ -575,7 +575,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         {
                             "component": "VCardText",
                             "content": [
-                                {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查并生成清理建议，不受定时检查间隔限制。"}
+                                {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查；页面将优先展示待删除候选媒体海报，而不是各硬盘的调试详情。"}
                             ],
                         },
                         {
@@ -589,15 +589,20 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 },
             ]
 
-        panels: List[dict] = []
-        overview_items: List[dict] = []
+        latest_by_strategy: List[Dict[str, Any]] = []
         seen: set[str] = set()
         for item in history:
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
             if strategy_name in seen:
                 continue
             seen.add(strategy_name)
+            latest_by_strategy.append(item)
+
+        overview_items: List[Dict[str, Any]] = []
+        merged_candidates: List[Dict[str, Any]] = []
+        for item in latest_by_strategy:
             candidates = self._filter_existing_candidates(item.get("all_candidates") or item.get("candidates") or [])
+            strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
             overview_items.append({
                 "strategy_name": strategy_name,
                 "monitor_path": item.get("monitor_path") or "-",
@@ -606,13 +611,29 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "time": item.get("time") or "-",
                 "candidate_count": len(candidates),
             })
-            panels.append(self._build_latest_candidates_panel(
-                sorted(candidates, key=lambda x: float(x.get("score") or 0), reverse=True),
-                title=f"最新候选评分榜 · {strategy_name}",
-                subtitle=f"监控路径：{item.get('monitor_path') or '-'}｜记录时间：{item.get('time') or '-'}"
-            ))
+            for candidate in candidates:
+                enriched = dict(candidate)
+                enriched["strategy_name"] = strategy_name
+                enriched["record_time"] = item.get("time") or "-"
+                enriched["monitor_path"] = item.get("monitor_path") or "-"
+                merged_candidates.append(enriched)
 
-        return [self._build_strategy_overview_panel(overview_items), *panels]
+        merged_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+
+        page: List[dict] = [self._build_strategy_overview_panel(overview_items)]
+        if merged_candidates:
+            page.append(self._build_latest_candidates_panel(
+                merged_candidates,
+                title="待删除候选媒体海报墙",
+                subtitle="优先展示当前仍存在的候选媒体海报；按删除优先级从高到低排序。"
+            ))
+        else:
+            page.append({
+                "component": "VAlert",
+                "props": {"type": "warning", "variant": "tonal", "text": "当前没有可展示的候选媒体海报。可能空间充足、候选已被删除，或扫描路径不存在。"}
+            })
+
+        return page
 
     def _filter_existing_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
@@ -629,17 +650,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if not items:
             return {
                 "component": "VAlert",
-                "props": {"type": "warning", "variant": "tonal", "text": "暂无可展示的策略记录。历史候选可能都已被删除，建议点击立即运行检查刷新。"}
+                "props": {"type": "warning", "variant": "tonal", "text": "暂无可展示的策略摘要。建议点击立即运行检查刷新。"}
             }
         return {
             "component": "VCard",
             "props": {"class": "mb-4"},
             "content": [
-                {"component": "VCardTitle", "text": "多盘策略总览"},
+                {"component": "VCardTitle", "text": "多盘策略摘要"},
                 {
                     "component": "VCardText",
                     "props": {"class": "pt-0 text-caption"},
-                    "text": "页面会自动过滤已不存在的候选路径；每个策略按最近一次记录独立展示，不再把不同硬盘混成一个榜。"
+                    "text": "这里只保留每块盘的摘要信息；具体硬盘诊断详情已从主页面弱化，主视图优先展示待删除候选媒体海报。"
                 },
                 {
                     "component": "div",
@@ -663,8 +684,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             ]
         }
 
-    def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]], title: str = "最新候选评分榜", subtitle: Optional[str] = None) -> Dict[str, Any]:
-        """构建最新一轮候选评分榜：第一名就是当前最优先删除。"""
+    def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]], title: str = "待删除候选媒体海报墙", subtitle: Optional[str] = None) -> Dict[str, Any]:
+        """构建候选媒体海报墙：优先展示当前最值得删除的媒体海报。"""
         if not candidates:
             return {
                 "component": "VAlert",
@@ -672,7 +693,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             }
 
         cards = []
-        for idx, item in enumerate(candidates[:5], start=1):
+        for idx, item in enumerate(candidates[:12], start=1):
             cards.append(self._build_candidate_card(item, idx))
 
         return {
@@ -687,12 +708,24 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 {
                     "component": "VCardText",
                     "props": {"class": "pt-0 text-caption"},
-                    "text": subtitle or "按候选评分从高到低排列；第 1 名是当前最优先删除。评分 = 空间收益分 + 时间陈旧分 + 低活跃分 + TMDB评分修正分。"
+                    "text": subtitle or "按候选评分从高到低排列；优先看海报、体积、天数和评分来判断删谁。"
                 },
                 {
-                    "component": "div",
-                    "props": {"class": "grid gap-3 grid-info-card p-4"},
-                    "content": cards,
+                    "component": "VCardText",
+                    "props": {"class": "pt-0 text-caption text-medium-emphasis"},
+                    "text": f"当前展示前 {min(len(candidates), 12)} 个现存候选海报。"
+                },
+                {
+                    "component": "VRow",
+                    "props": {"class": "pa-2"},
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "sm": 6, "md": 4, "lg": 3},
+                            "content": [card],
+                        }
+                        for card in cards
+                    ],
                 }
             ]
         }
@@ -715,53 +748,67 @@ class DiskSpaceAutoCleaner(_PluginBase):
         rank_text = "🥇 当前最优先删除" if rank == 1 else f"#{rank}"
 
         activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
-        details = [
-            f"评分: {score:.2f}（{rank_text}）",
-            f"大小: {float(item.get('size_gb') or 0):.2f}GB｜陈旧: {item.get('age_days') or 0}天",
-            f"空间分: {float(item.get('space_score') or 0):.2f}｜时间分: {float(item.get('age_score') or 0):.2f}｜低活跃分: {float(item.get('inactive_score') or 0):.2f}",
-            f"活跃度: {activity_reason}",
-            f"TMDB: {tmdb_rating if tmdb_rating is not None else '未参与'} / 人数: {tmdb_vote_count if tmdb_vote_count is not None else '-'} / 修正: {tmdb_modifier:+.2f}",
-            f"说明: {tmdb_reason}",
+        summary_lines = [
+            f"{float(item.get('size_gb') or 0):.2f}GB · {item.get('age_days') or 0}天 · {rank_text}",
+            f"{item.get('strategy_name') or '-'}",
+            f"{item.get('monitor_path') or '-'}",
         ]
+
+        meta_chips = [
+            {"label": f"评分 {score:.2f}", "color": "primary"},
+            {"label": f"{float(item.get('size_gb') or 0):.2f}GB", "color": "warning"},
+            {"label": f"{item.get('age_days') or 0}天", "color": "secondary"},
+        ]
+        if tmdb_rating is not None:
+            meta_chips.append({"label": f"TMDB {tmdb_rating}", "color": "success"})
 
         return {
             "component": "VCard",
-            "props": {"variant": "outlined", "class": "overflow-hidden"},
+            "props": {"variant": "outlined", "class": "overflow-hidden h-100"},
             "content": [
                 {
-                    "component": "div",
-                    "props": {"class": "d-flex justify-space-start flex-nowrap flex-row"},
+                    "component": "VRow",
+                    "props": {"class": "ma-0", "noGutters": True},
                     "content": [
                         {
-                            "component": "div",
+                            "component": "VCol",
+                            "props": {"cols": 4, "sm": 3, "md": 12, "class": "pa-0"},
                             "content": [
                                 {
                                     "component": "VImg",
                                     "props": {
                                         "src": poster_src,
-                                        "height": 150,
-                                        "width": 100,
-                                        "aspect-ratio": "2/3",
-                                        "class": "object-cover shadow ring-gray-500",
+                                        "height": 220,
                                         "cover": True,
+                                        "class": "object-cover",
                                     }
                                 }
                             ]
                         },
                         {
-                            "component": "div",
-                            "props": {"class": "min-w-0"},
+                            "component": "VCol",
+                            "props": {"cols": 8, "sm": 9, "md": 12},
                             "content": [
                                 {
                                     "component": "VCardTitle",
-                                    "props": {"class": "py-1 pl-2 pr-4 text-lg whitespace-nowrap"},
+                                    "props": {"class": "pb-1 text-subtitle-1"},
                                     "content": [{"component": "a", "props": {"href": href, "target": "_blank"}, "text": title}],
                                 },
+                                {
+                                    "component": "div",
+                                    "props": {"class": "px-4 pb-2 d-flex flex-wrap ga-2"},
+                                    "content": [
+                                        {"component": "VChip", "props": {"size": "small", "color": chip.get("color"), "variant": "tonal"}, "text": chip.get("label")}
+                                        for chip in meta_chips
+                                    ]
+                                },
                                 *[
-                                    {"component": "VCardText", "props": {"class": "pa-0 px-2 text-caption"}, "text": text}
-                                    for text in details
+                                    {"component": "VCardText", "props": {"class": "py-0 text-caption"}, "text": text}
+                                    for text in summary_lines
                                 ],
-                                {"component": "VCardText", "props": {"class": "pa-0 px-2 text-caption text-medium-emphasis"}, "text": item.get("path") or ""},
+                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": activity_reason},
+                                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"{tmdb_reason} · {('投票 ' + str(tmdb_vote_count)) if tmdb_vote_count is not None else '无投票数'}"},
+                                {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": item.get("path") or ""},
                             ]
                         }
                     ]
