@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.8.0"
+    plugin_version = "3.8.1"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -575,7 +575,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         {
                             "component": "VCardText",
                             "content": [
-                                {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查；页面将优先展示待删除候选媒体海报，而不是各硬盘的调试详情。"}
+                                {"component": "div", "content": "点击下方按钮立即执行硬盘空间检查；页面会分别展示待删除候选和已删除记录。"}
                             ],
                         },
                         {
@@ -599,9 +599,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
             latest_by_strategy.append(item)
 
         overview_items: List[Dict[str, Any]] = []
-        merged_candidates: List[Dict[str, Any]] = []
+        merged_pending_candidates: List[Dict[str, Any]] = []
+        merged_deleted_candidates: List[Dict[str, Any]] = []
         for item in latest_by_strategy:
-            candidates = self._filter_existing_candidates(item.get("all_candidates") or item.get("candidates") or [])
+            pending_candidates = self._build_pending_candidates(item)
+            deleted_candidates = self._build_deleted_candidates(item)
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
             overview_items.append({
                 "strategy_name": strategy_name,
@@ -609,49 +611,115 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "free_text": item.get("free_text") or "-",
                 "summary": item.get("summary") or "-",
                 "time": item.get("time") or "-",
-                "candidate_count": len(candidates),
+                "pending_count": len(pending_candidates),
+                "deleted_count": len(deleted_candidates),
             })
-            for candidate in candidates:
+            for candidate in pending_candidates:
                 enriched = dict(candidate)
                 enriched["strategy_name"] = strategy_name
                 enriched["record_time"] = item.get("time") or "-"
                 enriched["monitor_path"] = item.get("monitor_path") or "-"
-                merged_candidates.append(enriched)
+                merged_pending_candidates.append(enriched)
+            for candidate in deleted_candidates:
+                enriched = dict(candidate)
+                enriched["strategy_name"] = strategy_name
+                enriched["record_time"] = item.get("time") or "-"
+                enriched["monitor_path"] = item.get("monitor_path") or "-"
+                merged_deleted_candidates.append(enriched)
 
-        merged_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+        merged_pending_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+        merged_deleted_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
 
         page: List[dict] = []
-        if merged_candidates:
-            page.append(self._build_filter_hint_panel(overview_items))
+        page.append(self._build_filter_hint_panel(overview_items))
+
+        if merged_deleted_candidates:
             page.append(self._build_latest_candidates_panel(
-                merged_candidates,
-                title="全局待删除候选海报墙",
-                subtitle="优先展示当前仍存在的候选媒体海报；按删除优先级从高到低排序。"
+                merged_deleted_candidates,
+                title="全局已删除媒体海报墙",
+                subtitle="这里展示最近一轮各策略中已经实际删除的媒体记录，便于回看刚刚删了什么。",
+                empty_text="当前暂无已删除媒体记录。",
+                status_label="已删除"
             ))
-            for item in latest_by_strategy:
-                strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
-                candidates = self._filter_existing_candidates(item.get("all_candidates") or item.get("candidates") or [])
-                if not candidates:
-                    continue
-                enriched_candidates: List[Dict[str, Any]] = []
-                for candidate in sorted(candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
+
+        if merged_pending_candidates:
+            page.append(self._build_latest_candidates_panel(
+                merged_pending_candidates,
+                title="全局待删除候选海报墙",
+                subtitle="这里展示当前仍存在的候选媒体海报；按删除优先级从高到低排序。",
+                empty_text="当前暂无待删除候选媒体。",
+                status_label="待删除"
+            ))
+
+        for item in latest_by_strategy:
+            strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
+            deleted_candidates = self._build_deleted_candidates(item)
+            if deleted_candidates:
+                enriched_deleted_candidates: List[Dict[str, Any]] = []
+                for candidate in sorted(deleted_candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
                     enriched = dict(candidate)
                     enriched["strategy_name"] = strategy_name
                     enriched["record_time"] = item.get("time") or "-"
                     enriched["monitor_path"] = item.get("monitor_path") or "-"
-                    enriched_candidates.append(enriched)
+                    enriched_deleted_candidates.append(enriched)
                 page.append(self._build_latest_candidates_panel(
-                    enriched_candidates,
-                    title=f"{strategy_name} · 候选海报",
-                    subtitle=f"监控盘：{item.get('monitor_path') or '-'}｜最近记录：{item.get('time') or '-'}"
+                    enriched_deleted_candidates,
+                    title=f"{strategy_name} · 已删除媒体",
+                    subtitle=f"监控盘：{item.get('monitor_path') or '-'}｜最近记录：{item.get('time') or '-'}",
+                    empty_text=f"{strategy_name} 暂无已删除媒体记录。",
+                    status_label="已删除"
                 ))
-        else:
+
+            pending_candidates = self._build_pending_candidates(item)
+            if pending_candidates:
+                enriched_pending_candidates: List[Dict[str, Any]] = []
+                for candidate in sorted(pending_candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
+                    enriched = dict(candidate)
+                    enriched["strategy_name"] = strategy_name
+                    enriched["record_time"] = item.get("time") or "-"
+                    enriched["monitor_path"] = item.get("monitor_path") or "-"
+                    enriched_pending_candidates.append(enriched)
+                page.append(self._build_latest_candidates_panel(
+                    enriched_pending_candidates,
+                    title=f"{strategy_name} · 待删除候选",
+                    subtitle=f"监控盘：{item.get('monitor_path') or '-'}｜最近记录：{item.get('time') or '-'}",
+                    empty_text=f"{strategy_name} 暂无待删除候选媒体。",
+                    status_label="待删除"
+                ))
+
+        if not merged_deleted_candidates and not merged_pending_candidates:
             page.append({
                 "component": "VAlert",
-                "props": {"type": "warning", "variant": "tonal", "text": "当前没有可展示的候选媒体海报。可能空间充足、候选已被删除，或扫描路径不存在。"}
+                "props": {"type": "warning", "variant": "tonal", "text": "当前没有可展示的数据。可能空间充足、候选已被删除，或扫描路径不存在。"}
             })
 
         return page
+
+    def _build_pending_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+        candidates = record.get("all_candidates") or record.get("candidates") or []
+        if self._is_deleted_record(record):
+            deleted_paths = {
+                str(item.get("path") or "")
+                for item in (record.get("deleted_candidates") or record.get("candidates") or [])
+                if item.get("path")
+            }
+            pending = [item for item in candidates if str(item.get("path") or "") not in deleted_paths]
+            return self._filter_existing_candidates(pending)
+        return self._filter_existing_candidates(candidates)
+
+    def _build_deleted_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self._is_deleted_record(record):
+            return []
+        deleted = record.get("deleted_candidates") or record.get("candidates") or []
+        return list(deleted)
+
+    @staticmethod
+    def _is_deleted_record(record: Dict[str, Any]) -> bool:
+        mode = str(record.get("record_mode") or "").strip().lower()
+        if mode:
+            return mode == "deleted"
+        summary = str(record.get("summary") or "")
+        return "已执行自动清理" in summary
 
     def _filter_existing_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
@@ -670,29 +738,31 @@ class DiskSpaceAutoCleaner(_PluginBase):
             chips.append({
                 "component": "VChip",
                 "props": {"size": "small", "variant": "tonal", "color": "primary", "class": "ma-1"},
-                "text": f"{item.get('strategy_name') or '-'} · {item.get('candidate_count', 0)}项"
+                "text": f"{item.get('strategy_name') or '-'} · 已删除 {item.get('deleted_count', 0)} 项 / 待删除 {item.get('pending_count', 0)} 项"
             })
         return {
             "component": "VCard",
             "props": {"class": "mb-4"},
             "content": [
-                {"component": "VCardTitle", "text": "按策略查看候选"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "当前宿主页面先用分区方式代替交互筛选：上方是全局候选海报墙，下方按每块盘/每个策略分别展示，方便你快速对比。"},
+                {"component": "VCardTitle", "text": "按策略查看数据"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "上方先看全局已删除和全局待删除；下方再按每块盘/每个策略分别展示，方便你快速区分已经删掉的和接下来准备删的。"},
                 {"component": "div", "props": {"class": "px-4 pb-4 d-flex flex-wrap"}, "content": chips}
             ]
         }
 
-    def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]], title: str = "待删除候选媒体海报墙", subtitle: Optional[str] = None) -> Dict[str, Any]:
-        """构建候选媒体海报墙：优先展示当前最值得删除的媒体海报。"""
+    def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]], title: str = "待删除候选媒体海报墙",
+                                       subtitle: Optional[str] = None, empty_text: Optional[str] = None,
+                                       status_label: str = "待删除") -> Dict[str, Any]:
+        """构建媒体海报墙：可展示待删除候选，也可展示已删除记录。"""
         if not candidates:
             return {
                 "component": "VAlert",
-                "props": {"type": "warning", "variant": "tonal", "text": f"{title} 暂无现存候选。可能历史候选已被删除，建议立即运行检查刷新。"}
+                "props": {"type": "warning", "variant": "tonal", "text": empty_text or f"{title} 暂无可展示数据。"}
             }
 
         cards = []
         for idx, item in enumerate(candidates[:12], start=1):
-            cards.append(self._build_candidate_card(item, idx))
+            cards.append(self._build_candidate_card(item, idx, status_label=status_label))
 
         return {
             "component": "VCard",
@@ -711,7 +781,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 {
                     "component": "VCardText",
                     "props": {"class": "pt-0 text-caption text-medium-emphasis"},
-                    "text": f"当前展示前 {min(len(candidates), 12)} 个现存候选海报。"
+                    "text": f"当前展示前 {min(len(candidates), 12)} 个{status_label}媒体海报。"
                 },
                 {
                     "component": "VRow",
@@ -728,7 +798,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             ]
         }
 
-    def _build_candidate_card(self, item: Dict[str, Any], rank: int) -> Dict[str, Any]:
+    def _build_candidate_card(self, item: Dict[str, Any], rank: int, status_label: str = "待删除") -> Dict[str, Any]:
         poster = self._resolve_candidate_poster(item)
         poster_src = poster or self._blank_poster
         name = item.get("tmdb_title") or item.get("name") or "未知媒体"
@@ -743,7 +813,10 @@ class DiskSpaceAutoCleaner(_PluginBase):
         tmdb_id = item.get("tmdb_id")
         tmdb_type = item.get("tmdb_type") or "movie"
         href = f"https://www.themoviedb.org/{tmdb_type}/{tmdb_id}" if tmdb_id else "#"
-        rank_text = "🥇 当前最优先删除" if rank == 1 else ("🔥 高优先级" if rank <= 3 else f"#{rank}")
+        if status_label == "已删除":
+            rank_text = "✅ 最近已删除" if rank == 1 else ("🗑️ 已删除" if rank <= 3 else f"#{rank}")
+        else:
+            rank_text = "🥇 当前最优先删除" if rank == 1 else ("🔥 高优先级" if rank <= 3 else f"#{rank}")
 
         activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
         summary_lines = [
@@ -753,6 +826,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         ]
 
         meta_chips = [
+            {"label": status_label, "color": "success" if status_label == "已删除" else "error"},
             {"label": f"评分 {score:.2f}", "color": "primary"},
             {"label": f"{float(item.get('size_gb') or 0):.2f}GB", "color": "warning"},
             {"label": f"{item.get('age_days') or 0}天", "color": "secondary"},
@@ -972,13 +1046,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     deleted, delete_errors = deleter.delete_selected(selected, scan_paths=scan_paths)
                     selected_for_record = deleted
                     summary = "空间不足，已执行自动清理" if deleted else "空间不足，但自动清理未成功；请查看错误日志"
+                    record_mode = "deleted" if deleted else "pending"
                 else:
                     selected_for_record = selected
                     summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
+                    record_mode = "pending"
 
                 self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary,
                                  scan_paths, diagnosis=diagnosis, all_candidates=candidates,
-                                 strategy_name=self._current_strategy_name)
+                                 strategy_name=self._current_strategy_name,
+                                 record_mode=record_mode,
+                                 deleted_candidates=deleted)
                 self._mark_low_space_scan(mpath)
 
                 if not self._dry_run and deleted:
@@ -1107,9 +1185,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,
                      diagnosis: Optional[Dict[str, Any]] = None,
                      all_candidates: Optional[List[Dict[str, Any]]] = None,
-                     strategy_name: Optional[str] = None):
+                     strategy_name: Optional[str] = None,
+                     record_mode: Optional[str] = None,
+                     deleted_candidates: Optional[List[Dict[str, Any]]] = None):
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
         scored_candidates = sorted(all_candidates or selected or [], key=lambda x: float(x.get("score") or 0), reverse=True)
+        deleted_serialized = [self._serialize_candidate(x) for x in (deleted_candidates or [])[:50]]
         record = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "monitor_path": monitor_path.as_posix(),
@@ -1127,7 +1208,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "diagnosis": diagnosis or {},
             "diagnosis_text": DiskSpaceNotifier(self).diagnosis_text(diagnosis),
             "all_candidate_count": len(scored_candidates),
+            "record_mode": record_mode or "pending",
             "all_candidates": [self._serialize_candidate(x) for x in scored_candidates[:100]],
+            "deleted_candidates": deleted_serialized,
             "candidates": [
                 self._serialize_candidate(x) for x in selected[:50]
             ],
