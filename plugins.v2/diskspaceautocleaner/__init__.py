@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.8.1"
+    plugin_version = "3.9.4"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -598,6 +598,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
             seen.add(strategy_name)
             latest_by_strategy.append(item)
 
+        latest_strategy_map: Dict[str, Dict[str, Any]] = {
+            (item.get("strategy_name") or item.get("monitor_path") or "默认策略"): item
+            for item in latest_by_strategy
+        }
+        strategy_totals: Dict[str, Dict[str, Any]] = self._build_strategy_totals(history, latest_strategy_map)
+
         overview_items: List[Dict[str, Any]] = []
         merged_pending_candidates: List[Dict[str, Any]] = []
         merged_deleted_candidates: List[Dict[str, Any]] = []
@@ -630,8 +636,27 @@ class DiskSpaceAutoCleaner(_PluginBase):
         merged_pending_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
         merged_deleted_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
 
+        total_deleted_count = len(merged_deleted_candidates)
+        total_deleted_gb = sum(float(x.get("size_gb") or 0) for x in merged_deleted_candidates)
+        total_pending_count = len(merged_pending_candidates)
+        total_pending_gb = sum(float(x.get("size_gb") or 0) for x in merged_pending_candidates)
+        historical_deleted_count = sum(int(item.get("deleted_count") or 0) for item in strategy_totals.values())
+        historical_deleted_gb = sum(float(item.get("deleted_gb") or 0) for item in strategy_totals.values())
+        latest_time = history[0].get("time") or "-"
+
         page: List[dict] = []
+        page.append(self._build_stats_overview_panel(
+            historical_deleted_count=historical_deleted_count,
+            historical_deleted_gb=historical_deleted_gb,
+            total_pending_count=total_pending_count,
+            total_pending_gb=total_pending_gb,
+            total_deleted_count=total_deleted_count,
+            total_deleted_gb=total_deleted_gb,
+            strategy_count=len(latest_by_strategy),
+            latest_time=latest_time,
+        ))
         page.append(self._build_filter_hint_panel(overview_items))
+        page.append(self._build_strategy_summary_panel(overview_items, strategy_totals))
 
         if merged_deleted_candidates:
             page.append(self._build_latest_candidates_panel(
@@ -744,11 +769,254 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "component": "VCard",
             "props": {"class": "mb-4"},
             "content": [
-                {"component": "VCardTitle", "text": "按策略查看数据"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "上方先看全局已删除和全局待删除；下方再按每块盘/每个策略分别展示，方便你快速区分已经删掉的和接下来准备删的。"},
+                {"component": "VCardTitle", "text": "查看数据布局说明"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "顶部先看历史总计与当前待删计量；中间看全局待删/已删榜单；下方再按每块盘或每个策略拆开看，方便你像豆瓣榜单一样快速浏览。"},
                 {"component": "div", "props": {"class": "px-4 pb-4 d-flex flex-wrap"}, "content": chips}
             ]
         }
+
+    def _build_stats_overview_panel(self, historical_deleted_count: int, historical_deleted_gb: float,
+                                    total_pending_count: int, total_pending_gb: float,
+                                    total_deleted_count: int, total_deleted_gb: float,
+                                    strategy_count: int, latest_time: str) -> Dict[str, Any]:
+        latest_scan_short = latest_time[5:16] if latest_time and latest_time != "-" and len(latest_time) >= 16 else latest_time
+        metrics = [
+            {
+                "title": "历史总删除",
+                "value": f"{historical_deleted_count}",
+                "unit": "项",
+                "subtitle": "累计释放空间",
+                "highlight": self._format_size_text(historical_deleted_gb),
+                "color": "error",
+                "icon": "🗑️",
+                "surface": "累计成果",
+                "accent": f"已沉淀 {historical_deleted_count} 条删除记录",
+            },
+            {
+                "title": "当前待删除",
+                "value": f"{total_pending_count}",
+                "unit": "项",
+                "subtitle": "预计释放空间",
+                "highlight": self._format_size_text(total_pending_gb),
+                "color": "warning",
+                "icon": "📦",
+                "surface": "当前压力",
+                "accent": "按候选优先级持续滚动",
+            },
+            {
+                "title": "最近已删除",
+                "value": f"{total_deleted_count}",
+                "unit": "项",
+                "subtitle": "最近展示释放",
+                "highlight": self._format_size_text(total_deleted_gb),
+                "color": "success",
+                "icon": "✅",
+                "surface": "最新结果",
+                "accent": "方便回看最近实际清掉的内容",
+            },
+            {
+                "title": "策略数量",
+                "value": f"{strategy_count}",
+                "unit": "个",
+                "subtitle": "最近扫描时间",
+                "highlight": latest_scan_short,
+                "color": "primary",
+                "icon": "📊",
+                "surface": "运行状态",
+                "accent": f"最近扫描：{latest_time}",
+            },
+        ]
+        return {
+            "component": "VCard",
+            "props": {"class": "mb-4 overflow-hidden"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "px-4 pt-4 pb-1 d-flex flex-wrap align-center justify-space-between ga-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "content": [
+                                {"component": "div", "props": {"class": "text-overline text-medium-emphasis"}, "text": "DASHBOARD"},
+                                {"component": "VCardTitle", "props": {"class": "px-0 pt-1 pb-1 text-h5"}, "text": "历史总计与当前计量"},
+                                {"component": "VCardText", "props": {"class": "px-0 pt-0 pb-1 text-caption"}, "text": "把累计删除、释放空间、当前待删规模和最近扫描时间收拢到顶部，读起来更像榜单首页。"},
+                            ]
+                        },
+                        {
+                            "component": "div",
+                            "props": {"class": "d-flex flex-wrap ga-2 pb-2"},
+                            "content": [
+                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "error"}, "text": f"历史释放 {self._format_size_text(historical_deleted_gb)}"},
+                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "warning"}, "text": f"待删 {total_pending_count} 项"},
+                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary"}, "text": f"最近扫描 {latest_time}"},
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "px-4 pb-2"},
+                    "content": [
+                        {
+                            "component": "VCard",
+                            "props": {"variant": "outlined", "class": "px-1 py-1"},
+                            "content": [
+                                {
+                                    "component": "VRow",
+                                    "props": {"class": "ma-0", "dense": True},
+                                    "content": [
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
+                                            "content": [
+                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "历史总释放"},
+                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(historical_deleted_gb)},
+                                            ]
+                                        },
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
+                                            "content": [
+                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "待删释放预估"},
+                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(total_pending_gb)},
+                                            ]
+                                        },
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
+                                            "content": [
+                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "最近删除释放"},
+                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(total_deleted_gb)},
+                                            ]
+                                        },
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
+                                            "content": [
+                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "当前活跃策略"},
+                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": f"{strategy_count} 个"},
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "props": {"class": "px-2 pb-3"},
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "sm": 6, "md": 3},
+                            "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "color": metric.get("color"), "class": "h-100 overflow-hidden"},
+                                "content": [
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "px-4 pt-3 pb-1 d-flex align-center justify-space-between"},
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": metric.get("surface")},
+                                            {"component": "div", "props": {"class": "text-h6"}, "text": metric.get("icon")},
+                                        ]
+                                    },
+                                    {"component": "VCardText", "props": {"class": "pb-1 text-caption text-medium-emphasis"}, "text": metric.get("title")},
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "px-4 d-flex align-end ga-2"},
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-h3 font-weight-bold lh-1"}, "text": metric.get("value")},
+                                            {"component": "div", "props": {"class": "text-caption pb-1 text-medium-emphasis"}, "text": metric.get("unit")},
+                                        ]
+                                    },
+                                    {"component": "VCardText", "props": {"class": "pt-2 pb-0 text-caption text-medium-emphasis"}, "text": metric.get("subtitle")},
+                                    {"component": "VCardText", "props": {"class": "pt-1 pb-1 text-subtitle-2 font-weight-medium"}, "text": metric.get("highlight")},
+                                    {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": metric.get("accent")},
+                                ]
+                            }]
+                        }
+                        for metric in metrics
+                    ]
+                }
+            ]
+        }
+
+    def _build_strategy_summary_panel(self, items: List[Dict[str, Any]], strategy_totals: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        if not items:
+            return {
+                "component": "VAlert",
+                "props": {"type": "info", "variant": "tonal", "text": "暂无策略统计数据。"}
+            }
+
+        cards = []
+        for item in items:
+            strategy_name = item.get("strategy_name") or "默认策略"
+            totals = strategy_totals.get(strategy_name) or {}
+            cards.append({
+                "component": "VCol",
+                "props": {"cols": 12, "sm": 6, "lg": 4},
+                "content": [{
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "h-100"},
+                    "content": [
+                        {"component": "VCardTitle", "props": {"class": "pb-1 text-subtitle-1"}, "text": strategy_name},
+                        {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": f"监控盘：{item.get('monitor_path') or '-'}"},
+                        {"component": "div", "props": {"class": "px-4 pb-2 d-flex flex-wrap ga-2"}, "content": [
+                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "error"}, "text": f"累计删除 {int(totals.get('deleted_count') or 0)} 项"},
+                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "success"}, "text": f"累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}"},
+                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "warning"}, "text": f"当前待删 {int(item.get('pending_count') or 0)} 项"},
+                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary"}, "text": f"扫描 {int(totals.get('scan_count') or 0)} 次"},
+                        ]},
+                        {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"最近剩余：{item.get('free_text') or '-'}"},
+                        {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"最近摘要：{item.get('summary') or '-'}"},
+                        {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": f"最近扫描：{item.get('time') or '-'}"},
+                    ]
+                }]
+            })
+
+        return {
+            "component": "VCard",
+            "props": {"class": "mb-4"},
+            "content": [
+                {"component": "VCardTitle", "text": "分策略累计计量"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "这里把每块盘 / 每个策略的累计删除数量、累计释放空间和当前待删数量集中展示。"},
+                {"component": "VRow", "props": {"class": "px-2 pb-4"}, "content": cards}
+            ]
+        }
+
+    def _build_strategy_totals(self, history: List[Dict[str, Any]], latest_strategy_map: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        totals: Dict[str, Dict[str, Any]] = {}
+        for record in history:
+            strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
+            item = totals.setdefault(strategy_name, {
+                "deleted_count": 0,
+                "deleted_gb": 0.0,
+                "scan_count": 0,
+            })
+            item["scan_count"] += 1
+            deleted_candidates = self._build_deleted_candidates(record)
+            item["deleted_count"] += len(deleted_candidates)
+            item["deleted_gb"] += sum(float(x.get("size_gb") or 0) for x in deleted_candidates)
+
+        for strategy_name, latest in latest_strategy_map.items():
+            item = totals.setdefault(strategy_name, {
+                "deleted_count": 0,
+                "deleted_gb": 0.0,
+                "scan_count": 0,
+            })
+            item["monitor_path"] = latest.get("monitor_path") or "-"
+            item["latest_time"] = latest.get("time") or "-"
+            item["latest_free_text"] = latest.get("free_text") or "-"
+            item["latest_summary"] = latest.get("summary") or "-"
+        return totals
+
+    @staticmethod
+    def _format_size_text(size_gb: float) -> str:
+        if size_gb >= 1024:
+            return f"{size_gb / 1024:.2f}TB"
+        return f"{size_gb:.2f}GB"
 
     def _build_latest_candidates_panel(self, candidates: List[Dict[str, Any]], title: str = "待删除候选媒体海报墙",
                                        subtitle: Optional[str] = None, empty_text: Optional[str] = None,
@@ -808,7 +1076,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
         score = float(item.get("score") or 0)
         tmdb_rating = item.get("tmdb_rating")
         tmdb_vote_count = item.get("tmdb_vote_count")
-        tmdb_modifier = float(item.get("tmdb_modifier") or 0)
         tmdb_reason = item.get("tmdb_reason") or "TMDB评分未参与"
         tmdb_id = item.get("tmdb_id")
         tmdb_type = item.get("tmdb_type") or "movie"
@@ -819,18 +1086,20 @@ class DiskSpaceAutoCleaner(_PluginBase):
             rank_text = "🥇 当前最优先删除" if rank == 1 else ("🔥 高优先级" if rank <= 3 else f"#{rank}")
 
         activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
-        summary_lines = [
-            f"{float(item.get('size_gb') or 0):.2f}GB · {item.get('age_days') or 0}天 · {rank_text}",
-            f"{item.get('strategy_name') or '-'}",
-            f"{item.get('monitor_path') or '-'}",
-        ]
+        size_text = f"{float(item.get('size_gb') or 0):.2f}GB"
+        age_text = f"{item.get('age_days') or 0}天"
+        strategy_name = item.get("strategy_name") or "-"
+        monitor_path = item.get("monitor_path") or "-"
+        record_time = item.get("record_time") or "-"
+        path_text = item.get("path") or ""
+        short_path = path_text if len(path_text) <= 52 else f"...{path_text[-52:]}"
+        score_color = "success" if status_label == "已删除" else ("error" if rank == 1 else ("warning" if rank <= 3 else "primary"))
 
         meta_chips = [
             {"label": status_label, "color": "success" if status_label == "已删除" else "error"},
             {"label": f"评分 {score:.2f}", "color": "primary"},
-            {"label": f"{float(item.get('size_gb') or 0):.2f}GB", "color": "warning"},
-            {"label": f"{item.get('age_days') or 0}天", "color": "secondary"},
-            {"label": rank_text, "color": "error" if rank == 1 else ("deep-orange" if rank <= 3 else "info")},
+            {"label": size_text, "color": "warning"},
+            {"label": age_text, "color": "secondary"},
         ]
         if tmdb_rating is not None:
             meta_chips.append({"label": f"TMDB {tmdb_rating}", "color": "success"})
@@ -840,79 +1109,122 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "props": {"variant": "outlined", "class": "overflow-hidden h-100"},
             "content": [
                 {
-                    "component": "VRow",
-                    "props": {"class": "ma-0", "noGutters": True},
+                    "component": "div",
+                    "props": {"class": "position-relative"},
                     "content": [
                         {
-                            "component": "VCol",
-                            "props": {"cols": 4, "sm": 3, "md": 12, "class": "pa-0"},
+                            "component": "VImg",
+                            "props": {
+                                "src": poster_src,
+                                "height": 300,
+                                "cover": True,
+                                "class": "object-cover",
+                            }
+                        },
+                        {
+                            "component": "div",
+                            "props": {"class": "position-absolute top-0 left-0 right-0 d-flex justify-space-between align-start pa-3"},
                             "content": [
                                 {
-                                    "component": "VImg",
-                                    "props": {
-                                        "src": poster_src,
-                                        "height": 260,
-                                        "cover": True,
-                                        "class": "object-cover",
-                                    }
-                                }
+                                    "component": "VChip",
+                                    "props": {"size": "small", "color": "grey-darken-3", "variant": "flat"},
+                                    "text": status_label,
+                                },
+                                {
+                                    "component": "VChip",
+                                    "props": {"size": "small", "color": score_color, "variant": "flat"},
+                                    "text": rank_text,
+                                },
                             ]
                         },
                         {
-                            "component": "VCol",
-                            "props": {"cols": 8, "sm": 9, "md": 12},
+                            "component": "div",
+                            "props": {"class": "position-absolute left-0 right-0 bottom-0 pa-3"},
                             "content": [
                                 {
-                                    "component": "VCardTitle",
-                                    "props": {"class": "pb-1 text-subtitle-1"},
-                                    "content": [{"component": "a", "props": {"href": href, "target": "_blank"}, "text": title}],
-                                },
-                                {
-                                    "component": "div",
-                                    "props": {"class": "px-4 pb-2 d-flex flex-wrap ga-2"},
+                                    "component": "VCard",
+                                    "props": {"variant": "tonal", "color": "grey-darken-4"},
                                     "content": [
-                                        {"component": "VChip", "props": {"size": "small", "color": chip.get("color"), "variant": "tonal"}, "text": chip.get("label")}
-                                        for chip in meta_chips
+                                        {
+                                            "component": "VCardTitle",
+                                            "props": {"class": "pb-1 text-subtitle-1 text-white"},
+                                            "content": [{"component": "a", "props": {"href": href, "target": "_blank"}, "text": title}],
+                                        },
+                                        {
+                                            "component": "VCardText",
+                                            "props": {"class": "pt-0 pb-2 text-caption text-white"},
+                                            "text": f"{strategy_name} · {size_text} · {age_text}",
+                                        },
                                     ]
-                                },
-                                *[
-                                    {"component": "VCardText", "props": {"class": "py-0 text-caption"}, "text": text}
-                                    for text in summary_lines
-                                ],
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": activity_reason},
-                                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"{tmdb_reason} · {('投票 ' + str(tmdb_vote_count)) if tmdb_vote_count is not None else '无投票数'}"},
-                                {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": item.get("path") or ""},
+                                }
                             ]
                         }
                     ]
-                }
+                },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "pt-3 pb-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "d-flex flex-wrap ga-2"},
+                            "content": [
+                                {"component": "VChip", "props": {"size": "small", "color": chip.get("color"), "variant": "tonal"}, "text": chip.get("label")}
+                                for chip in meta_chips
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "py-0"},
+                    "content": [
+                        {
+                            "component": "VRow",
+                            "props": {"class": "ma-0"},
+                            "content": [
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 4, "class": "py-1"},
+                                    "content": [
+                                        {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "删除评分"},
+                                        {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"}, "text": f"{score:.2f}"},
+                                    ]
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 4, "class": "py-1"},
+                                    "content": [
+                                        {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "所属策略"},
+                                        {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold text-truncate"}, "text": strategy_name},
+                                    ]
+                                },
+                                {
+                                    "component": "VCol",
+                                    "props": {"cols": 4, "class": "py-1"},
+                                    "content": [
+                                        {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "记录时间"},
+                                        {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"}, "text": record_time[5:16] if len(record_time) >= 16 else record_time},
+                                    ]
+                                },
+                            ]
+                        }
+                    ]
+                },
+                {"component": "VDivider"},
+                {"component": "VCardText", "props": {"class": "py-2 text-caption"}, "text": f"监控盘：{monitor_path}"},
+                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": activity_reason},
+                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"{tmdb_reason} · {('投票 ' + str(tmdb_vote_count)) if tmdb_vote_count is not None else '无投票数'}"},
+                {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": short_path},
             ]
         }
 
     def _resolve_candidate_poster(self, item: Dict[str, Any]) -> Optional[str]:
-        """页面展示时兜底补海报，兼容旧历史里未保存 poster 的候选。"""
+        """页面展示时按豆瓣榜单插件口径取海报：只认已保存的 MoviePilot poster。"""
         poster = item.get("poster")
         if poster:
             return poster
-
-        key = str(item.get("tmdb_id") or item.get("path") or item.get("name") or "")
-        if key in self._poster_cache:
-            return self._poster_cache.get(key)
-
-        poster = None
-        try:
-            tmdb_id = item.get("tmdb_id")
-            tmdb_type = item.get("tmdb_type") or "movie"
-            if tmdb_id:
-                media_chain = MediaChain()
-                mtype = DiskSpaceUtils.tmdb_type_to_media_type(tmdb_type)
-                tmdb_info = media_chain.tmdb_info(tmdbid=tmdb_id, mtype=mtype)
-                poster = DiskSpaceUtils.get_media_poster(None, tmdb_info)
-        except Exception as e:
-            logger.debug(f"候选海报兜底查询失败：{item.get('name') or item.get('path')} - {e}")
-
-        self._poster_cache[key] = poster
-        return poster
+        return None
 
     def _get_media_server_service(self, name: str):
         """获取 MoviePilot 已配置的媒体服务器服务实例。"""

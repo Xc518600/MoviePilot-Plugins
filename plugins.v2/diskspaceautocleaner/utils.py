@@ -531,7 +531,7 @@ class DiskSpaceUtils:
 
     @staticmethod
     def get_media_poster(mediainfo: Any = None, tmdb_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """优先从 MoviePilot 识别信息取海报，失败再从 TMDB poster_path 拼接。"""
+        """按豆瓣榜单插件口径取海报：仅使用 MoviePilot 识别出的海报。"""
         try:
             if mediainfo and hasattr(mediainfo, "get_poster_image"):
                 poster = mediainfo.get_poster_image()
@@ -539,12 +539,6 @@ class DiskSpaceUtils:
                     return poster
         except Exception:
             pass
-
-        tmdb_info = tmdb_info or {}
-        for key in ("poster_path", "poster", "cover", "image"):
-            poster = tmdb_info.get(key)
-            if poster:
-                return DiskSpaceUtils.build_tmdb_poster_url(poster)
         return None
 
     @staticmethod
