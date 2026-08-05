@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.10"
+    plugin_version = "3.9.11"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -848,56 +848,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             "content": [
                                 {"component": "VCardTitle", "props": {"class": "px-0 pt-1 pb-1 text-h5"}, "text": "历史总计"},
                                 {"component": "VCardText", "props": {"class": "px-0 pt-0 pb-1 text-caption"}, "text": ""},
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "component": "div",
-                    "props": {"class": "px-4 pb-2"},
-                    "content": [
-                        {
-                            "component": "VCard",
-                            "props": {"variant": "outlined", "class": "px-1 py-1"},
-                            "content": [
-                                {
-                                    "component": "VRow",
-                                    "props": {"class": "ma-0", "dense": True},
-                                    "content": [
-                                        {
-                                            "component": "VCol",
-                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
-                                            "content": [
-                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "历史总释放"},
-                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(historical_deleted_gb)},
-                                            ]
-                                        },
-                                        {
-                                            "component": "VCol",
-                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
-                                            "content": [
-                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "待删释放预估"},
-                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(total_pending_gb)},
-                                            ]
-                                        },
-                                        {
-                                            "component": "VCol",
-                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
-                                            "content": [
-                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "最近删除释放"},
-                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": self._format_size_text(total_deleted_gb)},
-                                            ]
-                                        },
-                                        {
-                                            "component": "VCol",
-                                            "props": {"cols": 12, "md": 3, "class": "py-2"},
-                                            "content": [
-                                                {"component": "div", "props": {"class": "px-3 text-caption text-medium-emphasis"}, "text": "当前活跃策略"},
-                                                {"component": "div", "props": {"class": "px-3 text-subtitle-1 font-weight-bold"}, "text": f"{strategy_count} 个"},
-                                            ]
-                                        }
-                                    ]
-                                }
                             ]
                         }
                     ]
