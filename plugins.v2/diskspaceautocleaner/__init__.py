@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.7"
+    plugin_version = "3.9.8"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -46,6 +46,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _protect_keywords = ""
     _history_limit = 50
     _history: List[Dict[str, Any]] = []
+    _deleted_history_limit = 200
+    _deleted_history: List[Dict[str, Any]] = []
     _scan_state: Dict[str, Dict[str, Any]] = {}
     _media_server = ""
     _active_play_protect = True
@@ -93,6 +95,25 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._history_limit = DiskSpaceUtils.to_int(config.get("history_limit"), 50)
             history = config.get("history") or []
             self._history = history if isinstance(history, list) else []
+            deleted_history = config.get("deleted_history") or []
+            self._deleted_history = deleted_history if isinstance(deleted_history, list) else []
+            if not self._deleted_history and self._history:
+                migrated_deleted_history: List[Dict[str, Any]] = []
+                for record in self._history:
+                    deleted_candidates = record.get("deleted_candidates") or []
+                    if not deleted_candidates:
+                        continue
+                    strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
+                    record_time = record.get("time") or "-"
+                    monitor_path = record.get("monitor_path") or "-"
+                    for item in deleted_candidates:
+                        deleted_entry = dict(item)
+                        deleted_entry["record_time"] = record_time
+                        deleted_entry["monitor_path"] = monitor_path
+                        deleted_entry["strategy_name"] = strategy_name
+                        migrated_deleted_history.append(deleted_entry)
+                migrated_deleted_history.sort(key=lambda x: str(x.get("record_time") or ""), reverse=True)
+                self._deleted_history = migrated_deleted_history[: self._deleted_history_limit]
             scan_state = config.get("scan_state") or {}
             self._scan_state = scan_state if isinstance(scan_state, dict) else {}
             self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
@@ -562,6 +583,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def get_page(self) -> List[dict]:
         history = list(self._history or [])[: self._history_limit]
+        deleted_history = list(self._deleted_history or [])[: self._deleted_history_limit]
         if not history:
             return [
                 {
@@ -615,7 +637,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
         overview_items: List[Dict[str, Any]] = []
         merged_pending_candidates: List[Dict[str, Any]] = []
         merged_deleted_candidates: List[Dict[str, Any]] = []
-        recent_deleted_candidates: List[Dict[str, Any]] = []
         for item in latest_by_strategy:
             pending_candidates = self._build_pending_candidates(item)
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
@@ -643,24 +664,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 enriched["monitor_path"] = (deleted_record or {}).get("monitor_path") or item.get("monitor_path") or "-"
                 merged_deleted_candidates.append(enriched)
 
-        for record in history:
-            deleted_candidates = self._build_deleted_candidates(record)
-            if not deleted_candidates:
-                continue
-            strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
-            record_time = record.get("time") or "-"
-            monitor_path = record.get("monitor_path") or "-"
-            for candidate in deleted_candidates:
-                enriched = dict(candidate)
-                enriched["strategy_name"] = strategy_name
-                enriched["record_time"] = record_time
-                enriched["monitor_path"] = monitor_path
-                recent_deleted_candidates.append(enriched)
-
         merged_pending_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
         merged_deleted_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
-        recent_deleted_candidates.sort(key=lambda x: str(x.get("record_time") or ""), reverse=True)
-        recent_deleted_candidates = recent_deleted_candidates[:10]
+        recent_deleted_candidates = deleted_history[:10]
 
         total_deleted_count = len(merged_deleted_candidates)
         total_deleted_gb = sum(float(x.get("size_gb") or 0) for x in merged_deleted_candidates)
@@ -671,16 +677,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
         latest_time = history[0].get("time") or "-"
 
         page: List[dict] = []
-        page.append(self._build_stats_overview_panel(
-            historical_deleted_count=historical_deleted_count,
-            historical_deleted_gb=historical_deleted_gb,
-            total_pending_count=total_pending_count,
-            total_pending_gb=total_pending_gb,
-            total_deleted_count=total_deleted_count,
-            total_deleted_gb=total_deleted_gb,
-            strategy_count=len(latest_by_strategy),
-            latest_time=latest_time,
-        ))
         page.append(self._build_strategy_summary_panel(overview_items, strategy_totals))
 
         if recent_deleted_candidates:
@@ -1022,7 +1018,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 {
                     "component": "VCardText",
                     "props": {"class": "pt-0 text-caption"},
-                    "text": subtitle or "按候选评分从高到低排列；优先看海报、体积、天数和评分来判断删谁。"
+                    "text": subtitle or ""
                 },
                 {
                     "component": "VCardText",
@@ -1405,6 +1401,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             config.update({
                 "run_once": self._run_once,
                 "history": self._history,
+                "deleted_history": self._deleted_history,
                 "scan_state": self._scan_state,
             })
             self.update_config(config)
@@ -1506,6 +1503,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
         self._history.insert(0, record)
         if len(self._history) > self._history_limit:
             self._history.pop()
+
+        for item in deleted_serialized:
+            deleted_entry = dict(item)
+            deleted_entry["record_time"] = record["time"]
+            deleted_entry["monitor_path"] = monitor_path.as_posix()
+            deleted_entry["strategy_name"] = strategy_name or self._current_strategy_name or monitor_path.as_posix()
+            self._deleted_history.insert(0, deleted_entry)
+        if len(self._deleted_history) > self._deleted_history_limit:
+            self._deleted_history = self._deleted_history[: self._deleted_history_limit]
+
         logger.info(
             f"硬盘空间检查记录已保存：{monitor_path}，摘要={summary}，候选={len(selected)}项，"
             f"预计释放={reclaim_gb:.1f}GB，扫描耗时={record['diagnosis'].get('scan_time_seconds', 0)}秒"
