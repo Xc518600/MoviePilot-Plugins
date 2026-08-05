@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.9"
+    plugin_version = "3.9.10"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -689,6 +689,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
         latest_time = history[0].get("time") or "-"
 
         page: List[dict] = []
+        page.append(self._build_stats_overview_panel(
+            historical_deleted_count=historical_deleted_count,
+            historical_deleted_gb=historical_deleted_gb,
+            total_pending_count=total_pending_count,
+            total_pending_gb=total_pending_gb,
+            total_deleted_count=total_deleted_count,
+            total_deleted_gb=total_deleted_gb,
+            strategy_count=len(latest_by_strategy),
+            latest_time=latest_time,
+        ))
         page.append(self._build_strategy_summary_panel(overview_items, strategy_totals))
 
         if recent_deleted_candidates:
