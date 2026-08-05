@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import threading
 import time
@@ -22,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.8"
+    plugin_version = "3.9.9"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -48,6 +49,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _deleted_history_limit = 200
     _deleted_history: List[Dict[str, Any]] = []
+    _deleted_log_backfill_limit = 200
     _scan_state: Dict[str, Dict[str, Any]] = {}
     _media_server = ""
     _active_play_protect = True
@@ -75,6 +77,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         triggered_immediate_run = False
+        runtime_state_changed = False
         if config:
             self._enabled = DiskSpaceUtils.to_bool(config.get("enabled"), False)
             self._notify = DiskSpaceUtils.to_bool(config.get("notify"), True)
@@ -114,6 +117,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         migrated_deleted_history.append(deleted_entry)
                 migrated_deleted_history.sort(key=lambda x: str(x.get("record_time") or ""), reverse=True)
                 self._deleted_history = migrated_deleted_history[: self._deleted_history_limit]
+                runtime_state_changed = True
+            if len(self._deleted_history) < 10:
+                backfilled_deleted_history = self._build_deleted_history_from_logs(existing=self._deleted_history)
+                if backfilled_deleted_history != self._deleted_history:
+                    self._deleted_history = backfilled_deleted_history
+                    runtime_state_changed = True
             scan_state = config.get("scan_state") or {}
             self._scan_state = scan_state if isinstance(scan_state, dict) else {}
             self._run_once = DiskSpaceUtils.to_bool(config.get("run_once"), False)
@@ -127,6 +136,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             strategy_profiles = config.get("strategy_profiles") or ""
             form_strategy_profiles = self._build_strategy_profiles_from_form(config)
             self._strategy_profiles = form_strategy_profiles or strategy_profiles
+
+        if runtime_state_changed:
+            self._persist_config()
 
         self.stop_service()
         if self._run_once:
@@ -1407,6 +1419,91 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self.update_config(config)
         except Exception as e:
             logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
+
+    def _build_deleted_history_from_logs(self, existing: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+
+        def _append_entry(entry: Dict[str, Any]):
+            path = str(entry.get("path") or "").strip()
+            record_time = str(entry.get("record_time") or "").strip()
+            if not path:
+                return
+            key = f"{record_time}::{path}"
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            merged.append(entry)
+
+        for item in existing or []:
+            _append_entry(dict(item))
+
+        log_dir = Path("/config/logs/plugins")
+        if not log_dir.exists():
+            return merged[: self._deleted_history_limit]
+
+        log_files = sorted(log_dir.glob("diskspaceautocleaner.log*"), reverse=True)
+        pattern = re.compile(r"(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?已删除：(?P<path>.+)$")
+        for log_file in log_files:
+            try:
+                with log_file.open("r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
+            for line in reversed(lines):
+                match = pattern.search(line.strip())
+                if not match:
+                    continue
+                deleted_path = match.group("path").strip()
+                record_time = match.group("time").strip()
+                title = self._guess_deleted_title_from_path(deleted_path)
+                monitor_path = self._guess_monitor_path_from_deleted_path(deleted_path)
+                _append_entry({
+                    "path": deleted_path,
+                    "name": title,
+                    "tmdb_title": title,
+                    "size_gb": 0,
+                    "age_days": 0,
+                    "score": 0,
+                    "space_score": 0,
+                    "age_score": 0,
+                    "inactive_score": 0,
+                    "tmdb_modifier": 0,
+                    "tmdb_rating": None,
+                    "tmdb_weighted_rating": None,
+                    "tmdb_vote_count": None,
+                    "tmdb_id": None,
+                    "tmdb_type": None,
+                    "poster": None,
+                    "tmdb_reason": "日志回填",
+                    "type": None,
+                    "activity_reason": "日志回填",
+                    "record_time": record_time,
+                    "monitor_path": monitor_path,
+                    "strategy_name": monitor_path,
+                })
+                if len(merged) >= self._deleted_log_backfill_limit:
+                    break
+            if len(merged) >= self._deleted_log_backfill_limit:
+                break
+
+        merged.sort(key=lambda x: str(x.get("record_time") or ""), reverse=True)
+        return merged[: self._deleted_history_limit]
+
+    @staticmethod
+    def _guess_deleted_title_from_path(path_text: str) -> str:
+        name = Path(path_text).name.strip()
+        return name or path_text or "未知媒体"
+
+    @staticmethod
+    def _guess_monitor_path_from_deleted_path(path_text: str) -> str:
+        try:
+            parts = Path(path_text).parts
+            if len(parts) >= 2 and parts[0] == os.sep:
+                return f"/{parts[1]}"
+        except Exception:
+            pass
+        return "-"
 
     def _state_key(self, monitor_path: Path) -> str:
         strategy_name = self._current_strategy_name or monitor_path.as_posix()
