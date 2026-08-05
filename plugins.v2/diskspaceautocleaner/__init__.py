@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.4"
+    plugin_version = "3.9.5"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -598,6 +598,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
             seen.add(strategy_name)
             latest_by_strategy.append(item)
 
+        latest_deleted_by_strategy: Dict[str, Dict[str, Any]] = {}
+        for item in history:
+            strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
+            if strategy_name in latest_deleted_by_strategy:
+                continue
+            if self._build_deleted_candidates(item):
+                latest_deleted_by_strategy[strategy_name] = item
+
         latest_strategy_map: Dict[str, Dict[str, Any]] = {
             (item.get("strategy_name") or item.get("monitor_path") or "默认策略"): item
             for item in latest_by_strategy
@@ -609,8 +617,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
         merged_deleted_candidates: List[Dict[str, Any]] = []
         for item in latest_by_strategy:
             pending_candidates = self._build_pending_candidates(item)
-            deleted_candidates = self._build_deleted_candidates(item)
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
+            deleted_record = latest_deleted_by_strategy.get(strategy_name)
+            deleted_candidates = self._build_deleted_candidates(deleted_record) if deleted_record else []
             overview_items.append({
                 "strategy_name": strategy_name,
                 "monitor_path": item.get("monitor_path") or "-",
@@ -629,8 +638,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             for candidate in deleted_candidates:
                 enriched = dict(candidate)
                 enriched["strategy_name"] = strategy_name
-                enriched["record_time"] = item.get("time") or "-"
-                enriched["monitor_path"] = item.get("monitor_path") or "-"
+                enriched["record_time"] = (deleted_record or {}).get("time") or item.get("time") or "-"
+                enriched["monitor_path"] = (deleted_record or {}).get("monitor_path") or item.get("monitor_path") or "-"
                 merged_deleted_candidates.append(enriched)
 
         merged_pending_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
@@ -655,7 +664,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             strategy_count=len(latest_by_strategy),
             latest_time=latest_time,
         ))
-        page.append(self._build_filter_hint_panel(overview_items))
         page.append(self._build_strategy_summary_panel(overview_items, strategy_totals))
 
         if merged_deleted_candidates:
@@ -678,19 +686,20 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         for item in latest_by_strategy:
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
-            deleted_candidates = self._build_deleted_candidates(item)
+            deleted_record = latest_deleted_by_strategy.get(strategy_name)
+            deleted_candidates = self._build_deleted_candidates(deleted_record) if deleted_record else []
             if deleted_candidates:
                 enriched_deleted_candidates: List[Dict[str, Any]] = []
                 for candidate in sorted(deleted_candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
                     enriched = dict(candidate)
                     enriched["strategy_name"] = strategy_name
-                    enriched["record_time"] = item.get("time") or "-"
-                    enriched["monitor_path"] = item.get("monitor_path") or "-"
+                    enriched["record_time"] = (deleted_record or {}).get("time") or item.get("time") or "-"
+                    enriched["monitor_path"] = (deleted_record or {}).get("monitor_path") or item.get("monitor_path") or "-"
                     enriched_deleted_candidates.append(enriched)
                 page.append(self._build_latest_candidates_panel(
                     enriched_deleted_candidates,
                     title=f"{strategy_name} · 已删除媒体",
-                    subtitle=f"监控盘：{item.get('monitor_path') or '-'}｜最近记录：{item.get('time') or '-'}",
+                    subtitle=f"监控盘：{(deleted_record or {}).get('monitor_path') or item.get('monitor_path') or '-'}｜最近删除记录：{(deleted_record or {}).get('time') or item.get('time') or '-'}",
                     empty_text=f"{strategy_name} 暂无已删除媒体记录。",
                     status_label="已删除"
                 ))
@@ -757,23 +766,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 continue
         return result
 
-    def _build_filter_hint_panel(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        chips = []
-        for item in items:
-            chips.append({
-                "component": "VChip",
-                "props": {"size": "small", "variant": "tonal", "color": "primary", "class": "ma-1"},
-                "text": f"{item.get('strategy_name') or '-'} · 已删除 {item.get('deleted_count', 0)} 项 / 待删除 {item.get('pending_count', 0)} 项"
-            })
-        return {
-            "component": "VCard",
-            "props": {"class": "mb-4"},
-            "content": [
-                {"component": "VCardTitle", "text": "查看数据布局说明"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "顶部先看历史总计与当前待删计量；中间看全局待删/已删榜单；下方再按每块盘或每个策略拆开看，方便你像豆瓣榜单一样快速浏览。"},
-                {"component": "div", "props": {"class": "px-4 pb-4 d-flex flex-wrap"}, "content": chips}
-            ]
-        }
 
     def _build_stats_overview_panel(self, historical_deleted_count: int, historical_deleted_gb: float,
                                     total_pending_count: int, total_pending_gb: float,
@@ -837,18 +829,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         {
                             "component": "div",
                             "content": [
-                                {"component": "div", "props": {"class": "text-overline text-medium-emphasis"}, "text": "DASHBOARD"},
-                                {"component": "VCardTitle", "props": {"class": "px-0 pt-1 pb-1 text-h5"}, "text": "历史总计与当前计量"},
-                                {"component": "VCardText", "props": {"class": "px-0 pt-0 pb-1 text-caption"}, "text": "把累计删除、释放空间、当前待删规模和最近扫描时间收拢到顶部，读起来更像榜单首页。"},
-                            ]
-                        },
-                        {
-                            "component": "div",
-                            "props": {"class": "d-flex flex-wrap ga-2 pb-2"},
-                            "content": [
-                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "error"}, "text": f"历史释放 {self._format_size_text(historical_deleted_gb)}"},
-                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "warning"}, "text": f"待删 {total_pending_count} 项"},
-                                {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary"}, "text": f"最近扫描 {latest_time}"},
+                                {"component": "VCardTitle", "props": {"class": "px-0 pt-1 pb-1 text-h5"}, "text": "历史总计"},
+                                {"component": "VCardText", "props": {"class": "px-0 pt-0 pb-1 text-caption"}, "text": ""},
                             ]
                         }
                     ]
@@ -980,7 +962,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "component": "VCard",
             "props": {"class": "mb-4"},
             "content": [
-                {"component": "VCardTitle", "text": "分策略累计计量"},
+                {"component": "VCardTitle", "text": "策略统计"},
                 {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "这里把每块盘 / 每个策略的累计删除数量、累计释放空间和当前待删数量集中展示。"},
                 {"component": "VRow", "props": {"class": "px-2 pb-4"}, "content": cards}
             ]
