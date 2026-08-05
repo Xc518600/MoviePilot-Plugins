@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.5"
+    plugin_version = "3.9.6"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -669,8 +669,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if merged_deleted_candidates:
             page.append(self._build_latest_candidates_panel(
                 merged_deleted_candidates,
-                title="全局已删除媒体海报墙",
-                subtitle="这里展示最近一轮各策略中已经实际删除的媒体记录，便于回看刚刚删了什么。",
+                title="全局已删除",
+                subtitle="",
                 empty_text="当前暂无已删除媒体记录。",
                 status_label="已删除"
             ))
@@ -686,24 +686,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         for item in latest_by_strategy:
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
-            deleted_record = latest_deleted_by_strategy.get(strategy_name)
-            deleted_candidates = self._build_deleted_candidates(deleted_record) if deleted_record else []
-            if deleted_candidates:
-                enriched_deleted_candidates: List[Dict[str, Any]] = []
-                for candidate in sorted(deleted_candidates, key=lambda x: float(x.get("score") or 0), reverse=True):
-                    enriched = dict(candidate)
-                    enriched["strategy_name"] = strategy_name
-                    enriched["record_time"] = (deleted_record or {}).get("time") or item.get("time") or "-"
-                    enriched["monitor_path"] = (deleted_record or {}).get("monitor_path") or item.get("monitor_path") or "-"
-                    enriched_deleted_candidates.append(enriched)
-                page.append(self._build_latest_candidates_panel(
-                    enriched_deleted_candidates,
-                    title=f"{strategy_name} · 已删除媒体",
-                    subtitle=f"监控盘：{(deleted_record or {}).get('monitor_path') or item.get('monitor_path') or '-'}｜最近删除记录：{(deleted_record or {}).get('time') or item.get('time') or '-'}",
-                    empty_text=f"{strategy_name} 暂无已删除媒体记录。",
-                    status_label="已删除"
-                ))
-
             pending_candidates = self._build_pending_candidates(item)
             if pending_candidates:
                 enriched_pending_candidates: List[Dict[str, Any]] = []
@@ -951,9 +933,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "warning"}, "text": f"当前待删 {int(item.get('pending_count') or 0)} 项"},
                             {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary"}, "text": f"扫描 {int(totals.get('scan_count') or 0)} 次"},
                         ]},
-                        {"component": "VCardText", "props": {"class": "py-1 text-caption"}, "text": f"最近剩余：{item.get('free_text') or '-'}"},
-                        {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"最近摘要：{item.get('summary') or '-'}"},
-                        {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": f"最近扫描：{item.get('time') or '-'}"},
                     ]
                 }]
             })
@@ -963,7 +942,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "props": {"class": "mb-4"},
             "content": [
                 {"component": "VCardTitle", "text": "策略统计"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "这里把每块盘 / 每个策略的累计删除数量、累计释放空间和当前待删数量集中展示。"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": ""},
                 {"component": "VRow", "props": {"class": "px-2 pb-4"}, "content": cards}
             ]
         }
@@ -1031,7 +1010,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 {
                     "component": "VCardText",
                     "props": {"class": "pt-0 text-caption text-medium-emphasis"},
-                    "text": f"当前展示前 {min(len(candidates), 12)} 个{status_label}媒体海报。"
+                    "text": ""
                 },
                 {
                     "component": "VRow",
@@ -1194,10 +1173,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     ]
                 },
                 {"component": "VDivider"},
-                {"component": "VCardText", "props": {"class": "py-2 text-caption"}, "text": f"监控盘：{monitor_path}"},
-                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": activity_reason},
-                {"component": "VCardText", "props": {"class": "py-1 text-caption text-medium-emphasis"}, "text": f"{tmdb_reason} · {('投票 ' + str(tmdb_vote_count)) if tmdb_vote_count is not None else '无投票数'}"},
-                {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": short_path},
             ]
         }
 
