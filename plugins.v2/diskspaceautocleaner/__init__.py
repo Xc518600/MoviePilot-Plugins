@@ -22,7 +22,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.6"
+    plugin_version = "3.9.7"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -615,6 +615,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         overview_items: List[Dict[str, Any]] = []
         merged_pending_candidates: List[Dict[str, Any]] = []
         merged_deleted_candidates: List[Dict[str, Any]] = []
+        recent_deleted_candidates: List[Dict[str, Any]] = []
         for item in latest_by_strategy:
             pending_candidates = self._build_pending_candidates(item)
             strategy_name = item.get("strategy_name") or item.get("monitor_path") or "默认策略"
@@ -642,8 +643,24 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 enriched["monitor_path"] = (deleted_record or {}).get("monitor_path") or item.get("monitor_path") or "-"
                 merged_deleted_candidates.append(enriched)
 
+        for record in history:
+            deleted_candidates = self._build_deleted_candidates(record)
+            if not deleted_candidates:
+                continue
+            strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
+            record_time = record.get("time") or "-"
+            monitor_path = record.get("monitor_path") or "-"
+            for candidate in deleted_candidates:
+                enriched = dict(candidate)
+                enriched["strategy_name"] = strategy_name
+                enriched["record_time"] = record_time
+                enriched["monitor_path"] = monitor_path
+                recent_deleted_candidates.append(enriched)
+
         merged_pending_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
         merged_deleted_candidates.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+        recent_deleted_candidates.sort(key=lambda x: str(x.get("record_time") or ""), reverse=True)
+        recent_deleted_candidates = recent_deleted_candidates[:10]
 
         total_deleted_count = len(merged_deleted_candidates)
         total_deleted_gb = sum(float(x.get("size_gb") or 0) for x in merged_deleted_candidates)
@@ -666,9 +683,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
         ))
         page.append(self._build_strategy_summary_panel(overview_items, strategy_totals))
 
-        if merged_deleted_candidates:
+        if recent_deleted_candidates:
             page.append(self._build_latest_candidates_panel(
-                merged_deleted_candidates,
+                recent_deleted_candidates,
                 title="全局已删除",
                 subtitle="",
                 empty_text="当前暂无已删除媒体记录。",
