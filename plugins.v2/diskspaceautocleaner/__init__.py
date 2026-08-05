@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.11"
+    plugin_version = "3.9.12"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -800,17 +800,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "icon": "🗑️",
                 "surface": "累计成果",
                 "accent": f"已沉淀 {historical_deleted_count} 条删除记录",
-            },
-            {
-                "title": "当前待删除",
-                "value": f"{total_pending_count}",
-                "unit": "项",
-                "subtitle": "预计释放空间",
-                "highlight": self._format_size_text(total_pending_gb),
-                "color": "warning",
-                "icon": "📦",
-                "surface": "当前压力",
-                "accent": "按候选优先级持续滚动",
             },
             {
                 "title": "最近已删除",
