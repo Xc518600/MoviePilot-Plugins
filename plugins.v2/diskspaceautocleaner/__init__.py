@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.12"
+    plugin_version = "3.9.13"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -738,12 +738,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     status_label="待删除"
                 ))
 
-        if not merged_deleted_candidates and not merged_pending_candidates:
-            page.append({
-                "component": "VAlert",
-                "props": {"type": "warning", "variant": "tonal", "text": "当前没有可展示的数据。可能空间充足、候选已被删除，或扫描路径不存在。"}
-            })
-
         return page
 
     def _build_pending_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -759,13 +753,18 @@ class DiskSpaceAutoCleaner(_PluginBase):
         return self._filter_existing_candidates(candidates)
 
     def _build_deleted_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+        deleted = record.get("deleted_candidates") or []
+        if deleted:
+            return list(deleted)
         if not self._is_deleted_record(record):
             return []
-        deleted = record.get("deleted_candidates") or record.get("candidates") or []
+        deleted = record.get("candidates") or []
         return list(deleted)
 
     @staticmethod
     def _is_deleted_record(record: Dict[str, Any]) -> bool:
+        if record.get("deleted_candidates"):
+            return True
         mode = str(record.get("record_mode") or "").strip().lower()
         if mode:
             return mode == "deleted"
