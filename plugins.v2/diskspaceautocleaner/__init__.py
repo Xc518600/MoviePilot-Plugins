@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.16"
+    plugin_version = "3.9.17"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -904,11 +904,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         metrics = []
         palette = [
-            {"color": "primary", "icon": "📊"},
+            {"color": "primary", "icon": "📁"},
             {"color": "success", "icon": "📁"},
-            {"color": "warning", "icon": "🔥"},
-            {"color": "error", "icon": "🗑️"},
-            {"color": "secondary", "icon": "🕒"},
+            {"color": "warning", "icon": "📁"},
+            {"color": "error", "icon": "📁"},
+            {"color": "secondary", "icon": "📁"},
         ]
 
         for idx, item in enumerate(items):
@@ -916,7 +916,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             totals = strategy_totals.get(strategy_name) or {}
             theme = palette[idx % len(palette)]
             metrics.append({
-                "title": "累计删除 / 累计释放",
+                "title": "累计删除",
                 "value": f"{int(totals.get('deleted_count') or 0)}",
                 "unit": "项",
                 "subtitle": f"累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}",
