@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.15"
+    plugin_version = "3.9.16"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -827,17 +827,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "accent": f"已沉淀 {historical_deleted_count} 条删除记录",
             },
             {
-                "title": "最近已删除",
-                "value": f"{total_deleted_count}",
-                "unit": "项",
-                "subtitle": "最近展示释放",
-                "highlight": self._format_size_text(total_deleted_gb),
-                "color": "success",
-                "icon": "✅",
-                "surface": "最新结果",
-                "accent": "方便回看最近实际清掉的内容",
-            },
-            {
                 "title": "策略数量",
                 "value": f"{strategy_count}",
                 "unit": "个",
@@ -915,11 +904,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
 
         metrics = []
         palette = [
-            {"color": "primary", "icon": "📊", "surface": "策略状态"},
-            {"color": "success", "icon": "📁", "surface": "监控盘"},
-            {"color": "warning", "icon": "🔥", "surface": "候选压力"},
-            {"color": "error", "icon": "🗑️", "surface": "累计成果"},
-            {"color": "secondary", "icon": "🕒", "surface": "最近扫描"},
+            {"color": "primary", "icon": "📊"},
+            {"color": "success", "icon": "📁"},
+            {"color": "warning", "icon": "🔥"},
+            {"color": "error", "icon": "🗑️"},
+            {"color": "secondary", "icon": "🕒"},
         ]
 
         for idx, item in enumerate(items):
@@ -927,14 +916,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
             totals = strategy_totals.get(strategy_name) or {}
             theme = palette[idx % len(palette)]
             metrics.append({
-                "title": strategy_name,
-                "value": f"{int(item.get('pending_count') or 0)}",
-                "unit": "项待删",
-                "subtitle": f"累计删除 {int(totals.get('deleted_count') or 0)} 项｜累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}",
+                "title": "累计删除 / 累计释放",
+                "value": f"{int(totals.get('deleted_count') or 0)}",
+                "unit": "项",
+                "subtitle": f"累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}",
                 "highlight": item.get("monitor_path") or "-",
                 "color": theme.get("color"),
                 "icon": theme.get("icon"),
-                "surface": theme.get("surface"),
+                "surface": strategy_name,
                 "accent": f"最近扫描：{totals.get('latest_time') or item.get('time') or '-'}｜扫描 {int(totals.get('scan_count') or 0)} 次｜{totals.get('latest_free_text') or item.get('free_text') or '-'}",
             })
 
