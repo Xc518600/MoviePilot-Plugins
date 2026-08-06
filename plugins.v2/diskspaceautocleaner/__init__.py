@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.13"
+    plugin_version = "3.9.14"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -49,6 +49,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _deleted_history_limit = 200
     _deleted_history: List[Dict[str, Any]] = []
+    _historical_deleted_count_total = 0
+    _historical_deleted_gb_total = 0.0
     _deleted_log_backfill_limit = 200
     _scan_state: Dict[str, Dict[str, Any]] = {}
     _media_server = ""
@@ -100,6 +102,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._history = history if isinstance(history, list) else []
             deleted_history = config.get("deleted_history") or []
             self._deleted_history = deleted_history if isinstance(deleted_history, list) else []
+            self._historical_deleted_count_total = DiskSpaceUtils.to_int(config.get("historical_deleted_count_total"), 0)
+            self._historical_deleted_gb_total = round(float(config.get("historical_deleted_gb_total") or 0), 2)
             if not self._deleted_history and self._history:
                 migrated_deleted_history: List[Dict[str, Any]] = []
                 for record in self._history:
@@ -122,6 +126,22 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 backfilled_deleted_history = self._build_deleted_history_from_logs(existing=self._deleted_history)
                 if backfilled_deleted_history != self._deleted_history:
                     self._deleted_history = backfilled_deleted_history
+                    runtime_state_changed = True
+            if self._historical_deleted_count_total <= 0:
+                migrated_count = 0
+                migrated_gb = 0.0
+                for record in self._history:
+                    deleted_candidates = record.get("deleted_candidates") or []
+                    if deleted_candidates:
+                        migrated_count += len(deleted_candidates)
+                        migrated_gb += sum(float(x.get("size_gb") or 0) for x in deleted_candidates)
+                if migrated_count > 0:
+                    self._historical_deleted_count_total = migrated_count
+                    self._historical_deleted_gb_total = round(migrated_gb, 2)
+                    runtime_state_changed = True
+                elif self._deleted_history:
+                    self._historical_deleted_count_total = len(self._deleted_history)
+                    self._historical_deleted_gb_total = round(sum(float(x.get("size_gb") or 0) for x in self._deleted_history), 2)
                     runtime_state_changed = True
             scan_state = config.get("scan_state") or {}
             self._scan_state = scan_state if isinstance(scan_state, dict) else {}
@@ -684,8 +704,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
         total_deleted_gb = sum(float(x.get("size_gb") or 0) for x in merged_deleted_candidates)
         total_pending_count = len(merged_pending_candidates)
         total_pending_gb = sum(float(x.get("size_gb") or 0) for x in merged_pending_candidates)
-        historical_deleted_count = sum(int(item.get("deleted_count") or 0) for item in strategy_totals.values())
-        historical_deleted_gb = sum(float(item.get("deleted_gb") or 0) for item in strategy_totals.values())
+        historical_deleted_count = self._historical_deleted_count_total
+        historical_deleted_gb = self._historical_deleted_gb_total
+        if historical_deleted_count <= 0:
+            historical_deleted_count = sum(int(item.get("deleted_count") or 0) for item in strategy_totals.values())
+            historical_deleted_gb = sum(float(item.get("deleted_gb") or 0) for item in strategy_totals.values())
+        if historical_deleted_count <= 0 and deleted_history:
+            historical_deleted_count = len(deleted_history)
+            historical_deleted_gb = sum(float(item.get("size_gb") or 0) for item in deleted_history)
         latest_time = history[0].get("time") or "-"
 
         page: List[dict] = []
@@ -1362,6 +1388,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "run_once": self._run_once,
                 "history": self._history,
                 "deleted_history": self._deleted_history,
+                "historical_deleted_count_total": self._historical_deleted_count_total,
+                "historical_deleted_gb_total": round(self._historical_deleted_gb_total, 2),
                 "scan_state": self._scan_state,
             })
             self.update_config(config)
@@ -1519,6 +1547,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
         scored_candidates = sorted(all_candidates or selected or [], key=lambda x: float(x.get("score") or 0), reverse=True)
         deleted_serialized = [self._serialize_candidate(x) for x in (deleted_candidates or [])[:50]]
+        deleted_total_gb = sum(float(x.get("size_gb") or 0) for x in deleted_serialized)
         record = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "monitor_path": monitor_path.as_posix(),
@@ -1555,6 +1584,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             deleted_entry["monitor_path"] = monitor_path.as_posix()
             deleted_entry["strategy_name"] = strategy_name or self._current_strategy_name or monitor_path.as_posix()
             self._deleted_history.insert(0, deleted_entry)
+        if deleted_serialized:
+            self._historical_deleted_count_total += len(deleted_serialized)
+            self._historical_deleted_gb_total = round(float(self._historical_deleted_gb_total or 0) + deleted_total_gb, 2)
         if len(self._deleted_history) > self._deleted_history_limit:
             self._deleted_history = self._deleted_history[: self._deleted_history_limit]
 
