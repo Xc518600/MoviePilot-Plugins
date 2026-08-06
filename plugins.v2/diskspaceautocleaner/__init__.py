@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.14"
+    plugin_version = "3.9.15"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -913,36 +913,85 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "props": {"type": "info", "variant": "tonal", "text": "暂无策略统计数据。"}
             }
 
-        cards = []
-        for item in items:
+        metrics = []
+        palette = [
+            {"color": "primary", "icon": "📊", "surface": "策略状态"},
+            {"color": "success", "icon": "📁", "surface": "监控盘"},
+            {"color": "warning", "icon": "🔥", "surface": "候选压力"},
+            {"color": "error", "icon": "🗑️", "surface": "累计成果"},
+            {"color": "secondary", "icon": "🕒", "surface": "最近扫描"},
+        ]
+
+        for idx, item in enumerate(items):
             strategy_name = item.get("strategy_name") or "默认策略"
             totals = strategy_totals.get(strategy_name) or {}
-            cards.append({
-                "component": "VCol",
-                "props": {"cols": 12, "sm": 6, "lg": 4},
-                "content": [{
-                    "component": "VCard",
-                    "props": {"variant": "outlined", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "pb-1 text-subtitle-1"}, "text": strategy_name},
-                        {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": f"监控盘：{item.get('monitor_path') or '-'}"},
-                        {"component": "div", "props": {"class": "px-4 pb-2 d-flex flex-wrap ga-2"}, "content": [
-                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "error"}, "text": f"累计删除 {int(totals.get('deleted_count') or 0)} 项"},
-                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "success"}, "text": f"累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}"},
-                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "warning"}, "text": f"当前待删 {int(item.get('pending_count') or 0)} 项"},
-                            {"component": "VChip", "props": {"size": "small", "variant": "tonal", "color": "primary"}, "text": f"扫描 {int(totals.get('scan_count') or 0)} 次"},
-                        ]},
-                    ]
-                }]
+            theme = palette[idx % len(palette)]
+            metrics.append({
+                "title": strategy_name,
+                "value": f"{int(item.get('pending_count') or 0)}",
+                "unit": "项待删",
+                "subtitle": f"累计删除 {int(totals.get('deleted_count') or 0)} 项｜累计释放 {self._format_size_text(float(totals.get('deleted_gb') or 0))}",
+                "highlight": item.get("monitor_path") or "-",
+                "color": theme.get("color"),
+                "icon": theme.get("icon"),
+                "surface": theme.get("surface"),
+                "accent": f"最近扫描：{totals.get('latest_time') or item.get('time') or '-'}｜扫描 {int(totals.get('scan_count') or 0)} 次｜{totals.get('latest_free_text') or item.get('free_text') or '-'}",
             })
 
         return {
             "component": "VCard",
-            "props": {"class": "mb-4"},
+            "props": {"class": "mb-4 overflow-hidden"},
             "content": [
-                {"component": "VCardTitle", "text": "策略统计"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": ""},
-                {"component": "VRow", "props": {"class": "px-2 pb-4"}, "content": cards}
+                {
+                    "component": "div",
+                    "props": {"class": "px-4 pt-4 pb-1 d-flex flex-wrap align-center justify-space-between ga-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "content": [
+                                {"component": "VCardTitle", "props": {"class": "px-0 pt-1 pb-1 text-h5"}, "text": "策略统计"},
+                                {"component": "VCardText", "props": {"class": "px-0 pt-0 pb-1 text-caption"}, "text": ""},
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "props": {"class": "px-2 pb-3"},
+                    "content": [
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "sm": 6, "md": 4, "lg": 3},
+                            "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "color": metric.get("color"), "class": "h-100 overflow-hidden"},
+                                "content": [
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "px-4 pt-3 pb-1 d-flex align-center justify-space-between"},
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": metric.get("surface")},
+                                            {"component": "div", "props": {"class": "text-h6"}, "text": metric.get("icon")},
+                                        ]
+                                    },
+                                    {"component": "VCardText", "props": {"class": "pb-1 text-caption text-medium-emphasis"}, "text": metric.get("title")},
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "px-4 d-flex align-end ga-2"},
+                                        "content": [
+                                            {"component": "div", "props": {"class": "text-h3 font-weight-bold lh-1"}, "text": metric.get("value")},
+                                            {"component": "div", "props": {"class": "text-caption pb-1 text-medium-emphasis"}, "text": metric.get("unit")},
+                                        ]
+                                    },
+                                    {"component": "VCardText", "props": {"class": "pt-2 pb-0 text-caption text-medium-emphasis"}, "text": metric.get("subtitle")},
+                                    {"component": "VCardText", "props": {"class": "pt-1 pb-1 text-subtitle-2 font-weight-medium"}, "text": metric.get("highlight")},
+                                    {"component": "VCardText", "props": {"class": "pt-0 pb-3 text-caption text-medium-emphasis"}, "text": metric.get("accent")},
+                                ]
+                            }]
+                        }
+                        for metric in metrics
+                    ]
+                }
             ]
         }
 
