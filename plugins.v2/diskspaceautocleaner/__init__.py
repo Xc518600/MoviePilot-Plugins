@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.17"
+    plugin_version = "3.9.18"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -1422,12 +1422,52 @@ class DiskSpaceAutoCleaner(_PluginBase):
             config = self.get_config() or {}
             if not isinstance(config, dict):
                 config = {}
+
+            persisted_history = config.get("history") or []
+            persisted_deleted_history = config.get("deleted_history") or []
+
+            def _merge_records(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]], limit: int, *, key_fields: Tuple[str, ...]):
+                merged: List[Dict[str, Any]] = []
+                seen: set[str] = set()
+
+                def _key(item: Dict[str, Any]) -> str:
+                    return "::".join(str(item.get(field) or "").strip() for field in key_fields)
+
+                for item in incoming + existing:
+                    if not isinstance(item, dict):
+                        continue
+                    key = _key(item)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append(item)
+                return merged[:limit]
+
+            merged_history = _merge_records(
+                persisted_history if isinstance(persisted_history, list) else [],
+                self._history,
+                self._history_limit,
+                key_fields=("time", "monitor_path", "strategy_name"),
+            )
+            merged_deleted_history = _merge_records(
+                persisted_deleted_history if isinstance(persisted_deleted_history, list) else [],
+                self._deleted_history,
+                self._deleted_history_limit,
+                key_fields=("record_time", "path"),
+            )
+
+            persisted_deleted_count = DiskSpaceUtils.to_int(config.get("historical_deleted_count_total"), 0)
+            persisted_deleted_gb = round(float(config.get("historical_deleted_gb_total") or 0), 2)
+            merged_deleted_count = max(int(self._historical_deleted_count_total or 0), persisted_deleted_count, len(merged_deleted_history))
+            merged_deleted_gb = max(float(self._historical_deleted_gb_total or 0), persisted_deleted_gb,
+                                    round(sum(float(x.get("size_gb") or 0) for x in merged_deleted_history), 2))
+
             config.update({
                 "run_once": self._run_once,
-                "history": self._history,
-                "deleted_history": self._deleted_history,
-                "historical_deleted_count_total": self._historical_deleted_count_total,
-                "historical_deleted_gb_total": round(self._historical_deleted_gb_total, 2),
+                "history": merged_history,
+                "deleted_history": merged_deleted_history,
+                "historical_deleted_count_total": merged_deleted_count,
+                "historical_deleted_gb_total": round(merged_deleted_gb, 2),
                 "scan_state": self._scan_state,
             })
             self.update_config(config)
