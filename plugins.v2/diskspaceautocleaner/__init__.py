@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.20"
+    plugin_version = "3.9.21"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -1393,14 +1393,14 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
                     record_mode = "pending"
 
+                strategy_key = self._current_strategy_name or mpath.as_posix()
+                self._strategy_scan_totals[strategy_key] = max(0, int(self._strategy_scan_totals.get(strategy_key, 0) or 0)) + 1
+                self._mark_low_space_scan(mpath)
                 self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary,
                                  scan_paths, diagnosis=diagnosis, all_candidates=candidates,
                                  strategy_name=self._current_strategy_name,
                                  record_mode=record_mode,
                                  deleted_candidates=deleted)
-                strategy_key = self._current_strategy_name or mpath.as_posix()
-                self._strategy_scan_totals[strategy_key] = max(0, int(self._strategy_scan_totals.get(strategy_key, 0) or 0)) + 1
-                self._mark_low_space_scan(mpath)
 
                 if not self._dry_run and deleted:
                     notifier.notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb,
