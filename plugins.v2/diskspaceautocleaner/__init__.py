@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.21"
+    plugin_version = "3.9.22"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -365,6 +365,51 @@ class DiskSpaceAutoCleaner(_PluginBase):
         for key, value in mapping.items():
             setattr(self, key, value)
         return previous
+
+    def _strategy_effective_text(self, strategy: Dict[str, Any]) -> str:
+        return (
+            f"name={strategy.get('name') or '-'} | "
+            f"monitor_path={strategy.get('monitor_path') or '-'} | "
+            f"media_paths={', '.join(strategy.get('media_paths') or []) or '-'} | "
+            f"min_free_gb={strategy.get('min_free_gb', '-') } | "
+            f"target_free_gb={strategy.get('target_free_gb', '-') } | "
+            f"recent_days_protect={strategy.get('recent_days_protect', '-') } | "
+            f"recent_play_days={strategy.get('recent_play_days', '-') } | "
+            f"max_delete_gb={strategy.get('max_delete_gb', '-') } | "
+            f"candidate_depth={strategy.get('candidate_depth', '-') } | "
+            f"max_candidates={strategy.get('max_candidates', '-') } | "
+            f"max_scan_items={strategy.get('max_scan_items', '-') } | "
+            f"scan_cooldown_minutes={strategy.get('scan_cooldown_minutes', '-') } | "
+            f"tmdb_top_n={strategy.get('tmdb_top_n', '-') } | "
+            f"active_play_protect={'true' if strategy.get('active_play_protect') else 'false'}"
+        )
+
+    def _candidate_skip_reason(self, item: Dict[str, Any]) -> str:
+        reasons: List[str] = []
+        flags = item.get("skip_reasons") or item.get("reasons") or []
+        if isinstance(flags, list):
+            reasons.extend([str(x).strip() for x in flags if str(x).strip()])
+        elif isinstance(flags, str) and flags.strip():
+            reasons.append(flags.strip())
+        activity = str(item.get("activity_reason") or "").strip()
+        if activity:
+            reasons.append(activity)
+        tmdb_reason = str(item.get("tmdb_reason") or "").strip()
+        if tmdb_reason:
+            reasons.append(tmdb_reason)
+        if item.get("is_recent"):
+            reasons.append(f"最近新增保护<{int(item.get('recent_days_protect') or self._recent_days_protect)}天")
+        if item.get("is_playing"):
+            reasons.append("正在播放保护")
+        if item.get("is_series_incomplete"):
+            reasons.append("电视剧未完结")
+        if item.get("is_protected_path"):
+            reasons.append("命中保护目录/关键词")
+        if item.get("is_oversize"):
+            reasons.append("超过单次删除上限")
+        if item.get("is_existing_missing"):
+            reasons.append("路径已不存在")
+        return "；".join(dict.fromkeys([x for x in reasons if x])) or "未命中可删条件"
 
     def _restore_strategy_context(self, previous: Dict[str, Any]):
         for key, value in (previous or {}).items():
@@ -742,6 +787,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
         latest_time = history[0].get("time") or "-"
 
         page: List[dict] = []
+        page.append(self._build_strategy_preview_panel(latest_by_strategy))
         page.append(self._build_stats_overview_panel(
             historical_deleted_count=historical_deleted_count,
             historical_deleted_gb=historical_deleted_gb,
@@ -792,6 +838,41 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 ))
 
         return page
+
+    def _build_strategy_preview_panel(self, latest_by_strategy: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not latest_by_strategy:
+            return {
+                "component": "VAlert",
+                "props": {"type": "info", "variant": "tonal", "text": "暂无策略预览数据。"}
+            }
+
+        items = []
+        for record in latest_by_strategy[:8]:
+            strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
+            resolved = self._resolve_strategy_for_monitor(Path(record.get("monitor_path") or "/"))
+            items.append({
+                "component": "VCol",
+                "props": {"cols": 12, "md": 6},
+                "content": [{
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "h-100"},
+                    "content": [
+                        {"component": "VCardTitle", "text": strategy_name},
+                        {"component": "VCardText", "props": {"class": "text-caption"}, "text": self._strategy_effective_text(resolved)},
+                        {"component": "VCardText", "props": {"class": "text-caption text-medium-emphasis"}, "text": f"最近扫描：{record.get('time') or '-'}"},
+                    ]
+                }]
+            })
+
+        return {
+            "component": "VCard",
+            "props": {"class": "mb-4"},
+            "content": [
+                {"component": "VCardTitle", "text": "策略预览"},
+                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "展示当前各策略的最终生效参数。"},
+                {"component": "VRow", "props": {"class": "pa-2"}, "content": items},
+            ]
+        }
 
     def _build_pending_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
         candidates = record.get("all_candidates") or record.get("candidates") or []
@@ -1119,6 +1200,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             rank_text = "🥇 当前最优先删除" if rank == 1 else ("🔥 高优先级" if rank <= 3 else f"#{rank}")
 
         activity_reason = item.get("activity_reason") or "未命中播放保护/最近播放降权"
+        skip_reason = self._candidate_skip_reason(item)
         size_text = f"{float(item.get('size_gb') or 0):.2f}GB"
         age_text = f"{item.get('age_days') or 0}天"
         strategy_name = item.get("strategy_name") or "-"
@@ -1244,6 +1326,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         }
                     ]
                 },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "pt-0 pb-2 text-caption text-medium-emphasis"},
+                    "text": f"淘汰/保护原因：{skip_reason}"
+                },
                 {"component": "VDivider"},
             ]
         }
@@ -1304,17 +1391,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
         if not self._enabled:
             logger.info("硬盘空间自动清理插件未启用，跳过检查")
             return
-        
+
         monitor_paths = self._get_effective_monitor_paths()
         if not monitor_paths:
             logger.warning("硬盘空间自动清理未配置监控路径")
             return
-        
-        # 初始化模块
+
         scanner = DiskSpaceScanner(self)
         deleter = DiskSpaceDeleter(self)
         notifier = DiskSpaceNotifier(self)
-        
+
         for monitor in monitor_paths:
             mpath = Path(monitor)
             if not mpath.exists():
@@ -1332,6 +1418,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     f"硬盘空间检查：{mpath} [{self._current_strategy_name}] 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)，"
                     f"触发阈值 {self._min_free_gb}GB，目标剩余 {self._target_free_gb}GB"
                 )
+                logger.info(f"策略实际生效参数：{self._strategy_effective_text(strategy)}")
 
                 scan_paths = strategy.get("media_paths") or scanner._media_paths_for_monitor(mpath)
                 if free_gb >= self._min_free_gb:
@@ -1344,7 +1431,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         [],
                         f"空间充足：当前剩余 {free_gb:.1f}GB >= 触发阈值 {self._min_free_gb}GB，未生成清理建议",
                         scan_paths,
-                        strategy_name=self._current_strategy_name
+                        strategy_name=self._current_strategy_name,
                     )
                     continue
 
@@ -1359,7 +1446,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                         f"空间不足，但处于扫描冷却期：{cooldown_text}",
                         scan_paths,
                         diagnosis={"scan_time_seconds": 0, "cooldown_active": True, "cooldown_text": cooldown_text},
-                        strategy_name=self._current_strategy_name
+                        strategy_name=self._current_strategy_name,
                     )
                     continue
 
@@ -1381,6 +1468,13 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     f"目标剩余 {self._target_free_gb}GB，需要释放约 {needed_gb:.1f}GB；"
                     f"扫描候选 {len(candidates)} 项，选中 {len(selected)} 项"
                 )
+                if diagnosis:
+                    logger.info(
+                        f"扫描诊断：扫描耗时={diagnosis.get('scan_time_seconds', 0)}秒，"
+                        f"扫描目录={diagnosis.get('roots_scanned', 0)}，候选={diagnosis.get('candidates_found', 0)}，"
+                        f"跳过保护={diagnosis.get('protected_skipped', 0)}，跳过缺失={diagnosis.get('missing_skipped', 0)}，"
+                        f"跳过电视剧={diagnosis.get('series_skipped', 0)}，目标释放={diagnosis.get('target_release_gb', 0):.1f}GB"
+                    )
                 deleted, delete_errors = ([], [])
 
                 if selected and not self._dry_run:
@@ -1396,17 +1490,34 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 strategy_key = self._current_strategy_name or mpath.as_posix()
                 self._strategy_scan_totals[strategy_key] = max(0, int(self._strategy_scan_totals.get(strategy_key, 0) or 0)) + 1
                 self._mark_low_space_scan(mpath)
-                self._save_record(mpath, free_gb, total_gb, free_percent, selected_for_record, summary,
-                                 scan_paths, diagnosis=diagnosis, all_candidates=candidates,
-                                 strategy_name=self._current_strategy_name,
-                                 record_mode=record_mode,
-                                 deleted_candidates=deleted)
+                self._save_record(
+                    mpath,
+                    free_gb,
+                    total_gb,
+                    free_percent,
+                    selected_for_record,
+                    summary,
+                    scan_paths,
+                    diagnosis=diagnosis,
+                    all_candidates=candidates,
+                    strategy_name=self._current_strategy_name,
+                    record_mode=record_mode,
+                    deleted_candidates=deleted,
+                )
 
                 if not self._dry_run and deleted:
-                    notifier.notify_report(mpath, free_gb, total_gb, free_percent, deleted, needed_gb,
-                                          scan_paths=scan_paths, diagnosis=diagnosis,
-                                          delete_errors=delete_errors,
-                                          strategy_name=self._current_strategy_name)
+                    notifier.notify_report(
+                        mpath,
+                        free_gb,
+                        total_gb,
+                        free_percent,
+                        deleted,
+                        needed_gb,
+                        scan_paths=scan_paths,
+                        diagnosis=diagnosis,
+                        delete_errors=delete_errors,
+                        strategy_name=self._current_strategy_name,
+                    )
             finally:
                 self._restore_strategy_context(previous)
 
