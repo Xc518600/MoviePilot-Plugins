@@ -787,7 +787,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
         latest_time = history[0].get("time") or "-"
 
         page: List[dict] = []
-        page.append(self._build_strategy_preview_panel(latest_by_strategy))
         page.append(self._build_stats_overview_panel(
             historical_deleted_count=historical_deleted_count,
             historical_deleted_gb=historical_deleted_gb,
@@ -838,41 +837,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 ))
 
         return page
-
-    def _build_strategy_preview_panel(self, latest_by_strategy: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not latest_by_strategy:
-            return {
-                "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": "暂无策略预览数据。"}
-            }
-
-        items = []
-        for record in latest_by_strategy[:8]:
-            strategy_name = record.get("strategy_name") or record.get("monitor_path") or "默认策略"
-            resolved = self._resolve_strategy_for_monitor(Path(record.get("monitor_path") or "/"))
-            items.append({
-                "component": "VCol",
-                "props": {"cols": 12, "md": 6},
-                "content": [{
-                    "component": "VCard",
-                    "props": {"variant": "outlined", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "text": strategy_name},
-                        {"component": "VCardText", "props": {"class": "text-caption"}, "text": self._strategy_effective_text(resolved)},
-                        {"component": "VCardText", "props": {"class": "text-caption text-medium-emphasis"}, "text": f"最近扫描：{record.get('time') or '-'}"},
-                    ]
-                }]
-            })
-
-        return {
-            "component": "VCard",
-            "props": {"class": "mb-4"},
-            "content": [
-                {"component": "VCardTitle", "text": "策略预览"},
-                {"component": "VCardText", "props": {"class": "pt-0 text-caption"}, "text": "展示当前各策略的最终生效参数。"},
-                {"component": "VRow", "props": {"class": "pa-2"}, "content": items},
-            ]
-        }
 
     def _build_pending_candidates(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
         candidates = record.get("all_candidates") or record.get("candidates") or []
