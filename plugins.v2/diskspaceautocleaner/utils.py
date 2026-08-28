@@ -503,6 +503,7 @@ class DiskSpaceUtils:
                         "tmdb_type": tmdb_type,
                         "title": media_title,
                         "poster": poster,
+                        "release_date": tmdb_info.get("release_date") or tmdb_info.get("first_air_date"),
                         "vote_average": vote_average,
                         "vote_count": vote_count,
                         "weighted_rating": round(weighted_rating, 2),
@@ -683,6 +684,47 @@ class DiskSpaceUtils:
         name = re.sub(r'[\s\-_.]+$', '', name)
         name = re.sub(r'\s{2,}', ' ', name)
         return name.strip() if name.strip() else None
+
+    @staticmethod
+    def extract_release_year_text(value: Any) -> Optional[int]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        match = re.search(r'(19|20)\d{2}', text)
+        if not match:
+            return None
+        try:
+            year = int(match.group(0))
+            return year if 1900 <= year <= 2100 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def extract_release_year_from_path(path: Path) -> Optional[int]:
+        candidates = [path.name]
+        try:
+            if path.is_file():
+                candidates.append(path.stem)
+            if path.parent:
+                candidates.append(path.parent.name)
+        except Exception:
+            pass
+        for item in candidates:
+            year = DiskSpaceUtils.extract_release_year_text(item)
+            if year:
+                return year
+        cleaned = DiskSpaceUtils.extract_movie_title(path)
+        return DiskSpaceUtils.extract_release_year_text(cleaned)
+
+    @staticmethod
+    def extract_release_year_from_tmdb_info(info: Any) -> Optional[int]:
+        if not isinstance(info, dict):
+            return None
+        for key in ["release_date", "first_air_date", "year", "release_year"]:
+            year = DiskSpaceUtils.extract_release_year_text(info.get(key))
+            if year:
+                return year
+        return None
 
     @staticmethod
 

@@ -236,10 +236,13 @@ class DiskSpaceScanner:
                     recent_match_reason = self._match_recent_media(child, recent_titles)
                     recent_penalty = -20.0 if recent_match_reason else 0.0
 
+                    local_release_year = DiskSpaceUtils.extract_release_year_from_path(child)
+                    year_bonus, year_reason = self._resolve_year_bonus(local_release_year, source="path")
                     score_detail = self._score_candidate(size_gb=size_gb, age_days=age_days,
                                                          target_release_gb=target_release_gb,
                                                          tmdb_modifier=0,
-                                                         inactive_score=recent_penalty)
+                                                         inactive_score=recent_penalty,
+                                                         year_bonus=year_bonus)
                     score = score_detail["score"]
                     
                     candidates.append({
@@ -263,13 +266,16 @@ class DiskSpaceScanner:
                         "tmdb_type": None,
                         "poster": None,
                         "tmdb_reason": "TMDB 延后到最终候选精排",
+                        "release_year": local_release_year,
+                        "year_bonus": year_bonus,
+                        "year_reason": year_reason,
                         "type": "目录" if child.is_dir() else "文件",
                         "activity_reason": recent_match_reason or "未命中播放保护/最近播放降权",
                     })
                     logger.info(
                         f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
                         f"空间分={score_detail['space_score']:.2f}，时间分={score_detail['age_score']:.2f}，"
-                        f"低活跃分={score_detail['inactive_score']:.2f}，TMDB修正=延后，"
+                        f"低活跃分={score_detail['inactive_score']:.2f}，年份加分={score_detail['year_bonus']:.2f}，TMDB修正=延后，"
                         f"初筛分={score:.2f}，活跃度={recent_match_reason or '未命中'}"
                     )
 
@@ -301,7 +307,8 @@ class DiskSpaceScanner:
         return 0.0
 
     def _score_candidate(self, size_gb: float, age_days: int,
-                         target_release_gb: float, tmdb_modifier: float = 0, inactive_score: float = 0) -> Dict[str, float]:
+                         target_release_gb: float, tmdb_modifier: float = 0,
+                         inactive_score: float = 0, year_bonus: float = 0) -> Dict[str, float]:
         """
         计算候选删除优先级：空间收益分 + 时间陈旧分 + 低活跃分 + TMDB评分修正分。
 
@@ -314,13 +321,27 @@ class DiskSpaceScanner:
         space_score = min(40.0, max(0.0, float(size_gb or 0)) / target * 40.0)
         age_score = self._age_bucket_score(int(age_days or 0), 30.0)
         inactive_score = float(inactive_score or 0)
-        score = space_score + age_score + inactive_score + float(tmdb_modifier or 0)
+        year_bonus = float(year_bonus or 0)
+        score = space_score + age_score + inactive_score + year_bonus + float(tmdb_modifier or 0)
         return {
             "space_score": round(space_score, 2),
             "age_score": round(age_score, 2),
             "inactive_score": round(inactive_score, 2),
+            "year_bonus": round(year_bonus, 2),
             "score": round(score, 2),
         }
+
+    def _resolve_year_bonus(self, release_year: Optional[int], source: str = "path") -> tuple[float, str]:
+        threshold = max(0, int(getattr(self._plugin, "_prefer_release_year_lte", 0) or 0))
+        bonus = float(getattr(self._plugin, "_prefer_release_year_bonus", 0) or 0)
+        if not release_year:
+            return 0.0, "未识别到上映年份"
+        if threshold <= 0 or bonus == 0:
+            return 0.0, "未启用上映年份优先删除"
+        if int(release_year) <= threshold:
+            source_text = "TMDB" if source == "tmdb" else "路径名"
+            return bonus, f"命中上映年份优先删除：{source_text}识别年份 {release_year} ≤ {threshold}，加分 {bonus:+.0f}"
+        return 0.0, f"上映年份 {release_year} > {threshold}，不加分"
 
     def _collect_active_media_titles(self) -> Set[str]:
         """收集当前媒体服务器正在播放的标题，供候选保护使用。"""
@@ -492,18 +513,34 @@ class DiskSpaceScanner:
                 item["tmdb_id"] = tmdb_rating.get("tmdb_id")
                 item["tmdb_type"] = tmdb_rating.get("tmdb_type")
                 item["poster"] = tmdb_rating.get("poster")
+                tmdb_release_year = DiskSpaceUtils.extract_release_year_from_tmdb_info(tmdb_rating)
+                if tmdb_release_year:
+                    item["release_year"] = tmdb_release_year
                 tmdb_modifier = float(tmdb_rating.get("modifier") or 0)
                 tmdb_reason = tmdb_rating.get("reason") or "TMDB 评分已参与排序"
+                year_bonus, year_reason = self._resolve_year_bonus(item.get("release_year"), source="tmdb")
+                item["year_bonus"] = round(year_bonus, 2)
+                item["year_reason"] = year_reason
                 if tmdb_rating.get("used"):
                     diagnosis["tmdb_rating_used"] += 1
                 else:
                     diagnosis["tmdb_rating_ignored"] += 1
             else:
                 diagnosis["tmdb_rating_ignored"] += 1
+                year_bonus, year_reason = self._resolve_year_bonus(item.get("release_year"), source="path")
+                item["year_bonus"] = round(year_bonus, 2)
+                item["year_reason"] = year_reason
 
             item["tmdb_modifier"] = tmdb_modifier
             item["tmdb_reason"] = tmdb_reason
-            item["score"] = round(float(item.get("base_score") or item.get("score") or 0) + tmdb_modifier, 2)
+            item["score"] = round(
+                float(item.get("space_score") or 0)
+                + float(item.get("age_score") or 0)
+                + float(item.get("inactive_score") or 0)
+                + float(item.get("year_bonus") or 0)
+                + tmdb_modifier,
+                2,
+            )
 
     def _should_early_stop(self, candidates: List[Dict[str, Any]], target_release_gb: float) -> bool:
         needed = float(target_release_gb or 0)

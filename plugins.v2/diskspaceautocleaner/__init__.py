@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.23"
+    plugin_version = "3.9.24"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -63,6 +63,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _scan_backoff_multiplier = 2
     _scan_backoff_max_minutes = 1440
     _tmdb_top_n = 30
+    _prefer_release_year_lte = 0
+    _prefer_release_year_bonus = 25
     _strategy_profiles = ""
     _current_strategy_name = ""
     _run_once = False
@@ -180,6 +182,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._scan_backoff_multiplier = max(1, DiskSpaceUtils.to_int(config.get("scan_backoff_multiplier"), 2))
             self._scan_backoff_max_minutes = DiskSpaceUtils.to_int(config.get("scan_backoff_max_minutes"), 1440)
             self._tmdb_top_n = max(1, DiskSpaceUtils.to_int(config.get("tmdb_top_n"), 30))
+            self._prefer_release_year_lte = max(0, DiskSpaceUtils.to_int(config.get("prefer_release_year_lte"), 0))
+            self._prefer_release_year_bonus = DiskSpaceUtils.to_int(config.get("prefer_release_year_bonus"), 25)
             strategy_profiles = config.get("strategy_profiles") or ""
             form_strategy_profiles = self._build_strategy_profiles_from_form(config)
             self._strategy_profiles = form_strategy_profiles or strategy_profiles
@@ -274,6 +278,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 'scan_backoff_multiplier': max(1, DiskSpaceUtils.to_int(item.get('scan_backoff_multiplier'), self._scan_backoff_multiplier)),
                 'scan_backoff_max_minutes': DiskSpaceUtils.to_int(item.get('scan_backoff_max_minutes'), self._scan_backoff_max_minutes),
                 'tmdb_top_n': max(1, DiskSpaceUtils.to_int(item.get('tmdb_top_n'), self._tmdb_top_n)),
+                'prefer_release_year_lte': max(0, DiskSpaceUtils.to_int(item.get('prefer_release_year_lte'), self._prefer_release_year_lte)),
+                'prefer_release_year_bonus': DiskSpaceUtils.to_int(item.get('prefer_release_year_bonus'), self._prefer_release_year_bonus),
                 'media_server': item.get('media_server') or self._media_server,
                 'active_play_protect': DiskSpaceUtils.to_bool(item.get('active_play_protect'), self._active_play_protect),
                 'protect_dirs': split_list(item.get('protect_dirs', '')) or DiskSpaceUtils.lines(self._protect_dirs),
@@ -316,6 +322,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             'scan_backoff_multiplier': self._scan_backoff_multiplier,
             'scan_backoff_max_minutes': self._scan_backoff_max_minutes,
             'tmdb_top_n': self._tmdb_top_n,
+            'prefer_release_year_lte': self._prefer_release_year_lte,
+            'prefer_release_year_bonus': self._prefer_release_year_bonus,
             'media_server': self._media_server,
             'active_play_protect': self._active_play_protect,
             'protect_dirs': DiskSpaceUtils.lines(self._protect_dirs),
@@ -355,6 +363,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             '_scan_backoff_multiplier': strategy.get('scan_backoff_multiplier', self._scan_backoff_multiplier),
             '_scan_backoff_max_minutes': strategy.get('scan_backoff_max_minutes', self._scan_backoff_max_minutes),
             '_tmdb_top_n': strategy.get('tmdb_top_n', self._tmdb_top_n),
+            '_prefer_release_year_lte': strategy.get('prefer_release_year_lte', self._prefer_release_year_lte),
+            '_prefer_release_year_bonus': strategy.get('prefer_release_year_bonus', self._prefer_release_year_bonus),
             '_media_server': strategy.get('media_server', self._media_server),
             '_active_play_protect': strategy.get('active_play_protect', self._active_play_protect),
             '_protect_dirs': chr(10).join(strategy.get('protect_dirs') or []),
@@ -381,6 +391,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             f"max_scan_items={strategy.get('max_scan_items', '-') } | "
             f"scan_cooldown_minutes={strategy.get('scan_cooldown_minutes', '-') } | "
             f"tmdb_top_n={strategy.get('tmdb_top_n', '-') } | "
+            f"prefer_release_year_lte={strategy.get('prefer_release_year_lte', '-') } | "
+            f"prefer_release_year_bonus={strategy.get('prefer_release_year_bonus', '-') } | "
             f"active_play_protect={'true' if strategy.get('active_play_protect') else 'false'}"
         )
 
@@ -446,7 +458,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if monitor_path:
                 lines.append(f"monitor_path={monitor_path}")
                 lines.append(f"monitor_paths={monitor_path}")
-            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n"]:
+            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n", "prefer_release_year_lte", "prefer_release_year_bonus"]:
                 value = config.get(prefix + key)
                 if value is None or str(value).strip() == "":
                     continue
@@ -494,6 +506,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "scan_backoff_multiplier": self._scan_backoff_multiplier,
                 "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
                 "tmdb_top_n": self._tmdb_top_n,
+                "prefer_release_year_lte": self._prefer_release_year_lte,
+                "prefer_release_year_bonus": self._prefer_release_year_bonus,
                 "media_server": default_media_server,
                 "active_play_protect": self._active_play_protect,
                 "protect_keywords": "",
@@ -513,6 +527,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "scan_backoff_multiplier": item.get("scan_backoff_multiplier", base["scan_backoff_multiplier"]),
                     "scan_backoff_max_minutes": item.get("scan_backoff_max_minutes", base["scan_backoff_max_minutes"]),
                     "tmdb_top_n": item.get("tmdb_top_n", base["tmdb_top_n"]),
+                    "prefer_release_year_lte": item.get("prefer_release_year_lte", base["prefer_release_year_lte"]),
+                    "prefer_release_year_bonus": item.get("prefer_release_year_bonus", base["prefer_release_year_bonus"]),
                     "media_server": item.get("media_server") or base["media_server"],
                     "active_play_protect": item.get("active_play_protect", base["active_play_protect"]),
                     "protect_keywords": "\n".join(item.get("protect_keywords") or []),
@@ -550,6 +566,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "hint": "连续低空间时，扫描冷却会按倍率递增"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "hint": "只对前 N 个初筛候选做 TMDB 评分修正"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "prefer_release_year_lte", "label": "优先删除上映年份≤", "type": "number", "hint": "命中上映年份小于等于该值的资源，会追加年份加分；包含该年份本身"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "prefer_release_year_bonus", "label": "年份优先加分", "type": "number", "hint": "命中上映年份阈值时，额外增加的删除优先分"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_candidates", "label": "最多候选数量", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_scan_items", "label": "最大扫描条目", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "candidate_depth", "label": "候选扫描深度", "type": "number"}}]},
@@ -676,6 +694,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             data[prefix + "scan_backoff_multiplier"] = strategy.get("scan_backoff_multiplier", self._scan_backoff_multiplier)
             data[prefix + "scan_backoff_max_minutes"] = strategy.get("scan_backoff_max_minutes", self._scan_backoff_max_minutes)
             data[prefix + "tmdb_top_n"] = strategy.get("tmdb_top_n", self._tmdb_top_n)
+            data[prefix + "prefer_release_year_lte"] = strategy.get("prefer_release_year_lte", self._prefer_release_year_lte)
+            data[prefix + "prefer_release_year_bonus"] = strategy.get("prefer_release_year_bonus", self._prefer_release_year_bonus)
             data[prefix + "media_server"] = strategy.get("media_server") or ""
             data[prefix + "active_play_protect"] = strategy.get("active_play_protect", self._active_play_protect)
             data[prefix + "protect_keywords"] = strategy.get("protect_keywords") or ""
@@ -1182,6 +1202,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
         ]
         if tmdb_rating is not None:
             meta_chips.append({"label": f"TMDB {tmdb_rating}", "color": "success"})
+        release_year = item.get("release_year")
+        year_bonus = float(item.get("year_bonus") or 0)
+        if release_year:
+            meta_chips.append({"label": f"上映 {release_year}", "color": "info"})
+        if year_bonus:
+            meta_chips.append({"label": f"年份加分 +{year_bonus:.0f}", "color": "deep-orange"})
 
         return {
             "component": "VCard",
@@ -1851,6 +1877,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "tmdb_type": item.get("tmdb_type"),
             "poster": item.get("poster"),
             "tmdb_reason": item.get("tmdb_reason"),
+            "release_year": item.get("release_year"),
+            "year_bonus": round(float(item.get("year_bonus") or 0), 2),
+            "year_reason": item.get("year_reason"),
             "type": item.get("type"),
             "activity_reason": item.get("activity_reason"),
         }
