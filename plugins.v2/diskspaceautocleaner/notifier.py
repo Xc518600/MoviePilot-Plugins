@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,7 +22,7 @@ class DiskSpaceNotifier:
         if not self._plugin._notify:
             return
         diagnosis = diagnosis or {}
-        text = self.outcome_text(diagnosis, selected)
+        title, text = self.push_message(strategy_name or str(monitor_path), diagnosis, selected)
         entry = self._plugin._get_scan_state_entry(monitor_path)
         # Dedupe is deliberately notification-only; scanning/deletion already ran.
         fingerprint = (bool(diagnosis.get("dry_run")), bool(diagnosis.get("error")),
@@ -30,12 +31,86 @@ class DiskSpaceNotifier:
         if entry.get("notification_fingerprint") == list(fingerprint) and time.time() - float(entry.get("notification_at") or 0) < 3600:
             return
         try:
-            self._plugin.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理",
-                                      text=f"策略：{strategy_name or monitor_path}\n监控路径：{monitor_path}\n{text}\n{self.diagnosis_text(diagnosis)}")
+            self._plugin.post_message(mtype=NotificationType.Plugin, title=title, text=text)
             entry.update(notification_fingerprint=list(fingerprint), notification_at=time.time())
             self._plugin._persist_config()
         except Exception as e:
             logger.warning(f"发送硬盘空间自动清理通知失败:{e}")
+
+    @staticmethod
+    def push_message(strategy_name, diagnosis, selected):
+        """Return a short human-facing push; keep verbose diagnosis in history/logs."""
+        diagnosis = diagnosis or {}
+        name = " ".join(str(strategy_name or "未命名策略").split())[:60]
+        if name.startswith(("/", "\\")) or "://" in name:
+            name = "未命名策略"
+
+        def number(value):
+            try:
+                value = float(value)
+                return value if math.isfinite(value) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        after = number(diagnosis.get("after_free_gb"))
+        fallback = bool(diagnosis.get("fallback_used") or diagnosis.get("fallback_safety_reached"))
+        if diagnosis.get("dry_run"):
+            target = diagnosis.get("fallback_target_free_gb") if diagnosis.get("fallback_planned") else diagnosis.get("target_free_gb")
+            status = "模拟检查异常（未删除）" if diagnosis.get("error") else "模拟建议（未删除）"
+            icon = "💡"
+        else:
+            target = diagnosis.get("fallback_target_free_gb") if fallback else diagnosis.get("target_free_gb")
+            target = number(target)
+            if diagnosis.get("error"):
+                status, icon = "清理异常", "⚠️"
+            elif diagnosis.get("delete_errors"):
+                status, icon = ("清理部分完成" if selected else "清理受阻"), "⚠️"
+            elif target is not None and after is not None and after >= target:
+                status, icon = ("已达安全水位" if fallback else "空间已达目标"), "✅"
+            elif not selected and "无候选" in str(diagnosis.get("stop_reason", "")):
+                status, icon = "无可清理候选", "⚠️"
+            elif target is None or after is None:
+                status, icon = "空间状态待确认", "⚠️"
+            else:
+                status, icon = "空间仍不足", "⚠️"
+
+        target = number(target)
+
+        def gb(value):
+            return "未知" if value is None else f"{value:.2f} GB"
+
+        delta_value = number(diagnosis.get("actual_change_gb"))
+        if delta_value is not None and abs(delta_value) < 0.005:
+            delta_value = 0.0  # Avoid -0.00 without hiding a meaningful decrease.
+        delta_text = gb(delta_value)
+        count_label = "建议删除" if diagnosis.get("dry_run") else "已删除"
+        lines = [f"剩余 {gb(after)} / 目标 {gb(target)}",
+                 f"{count_label}{len(selected)} 项，空间变化 {delta_text}"]
+        if diagnosis.get("dry_run"):
+            lines.append("模拟报告：仅生成建议，未实际删除文件")
+            if diagnosis.get("error"):
+                lines.append("检查异常，请查看日志")
+        elif diagnosis.get("error"):
+            lines.append("检查/清理异常，已停止本盘任务，请查看日志")
+        elif diagnosis.get("delete_errors"):
+            lines.append(f"删除失败/保护复核跳过 {len(diagnosis['delete_errors'])} 项，请查看日志")
+        elif icon == "✅":
+            pass  # The title already states success; do not repeat it in the body.
+        elif target is None or after is None:
+            lines.append("空间数据不完整，请查看日志确认")
+        elif selected and delta_value is not None and abs(delta_value) < 0.01:
+            lines.append("删除后空间未明显增加，可检查硬链接、快照或文件占用")
+        elif not selected:
+            lines.append("无候选或受限制（保护规则/删除上限）")
+        elif delta_value is not None and delta_value < 0:
+            lines.append("实测剩余空间减少，可检查并发写入或文件占用")
+        else:
+            lines.append("空间仍不足，请查看清理记录")
+        if diagnosis.get("fallback_used"):
+            lines.append("已尝试兜底清理")
+        elif diagnosis.get("fallback_planned"):
+            lines.append("计划尝试兜底清理（模拟）")
+        return f"{icon} {name} · {status}", "\n".join(lines)
 
     @staticmethod
     def outcome_text(diagnosis, selected):

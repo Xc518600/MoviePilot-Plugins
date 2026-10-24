@@ -92,7 +92,7 @@ class CleanerTests(unittest.TestCase):
     def test_actual_target_stops_after_first(self):
         self.run_check([candidate(1), candidate(2)])
         self.assertEqual(self.deleter.delete_selected.call_count, 1)
-        self.assertIn('已达目标', self.p.post_message.call_args.kwargs['text'])
+        self.assertIn('已达目标', self.p.post_message.call_args.kwargs['title'])
 
     def test_estimate_does_not_truncate_when_no_space_released(self):
         self.run_check([candidate(1, 30), candidate(2, 30), candidate(3, 30)],
@@ -402,7 +402,7 @@ class PipelineFallbackTests(unittest.TestCase):
         self.run_check([self.recent(1)], [usage(5), usage(15)])
         self.assertIn('安全水位', self.diagnosis()['stop_reason'])
         self.assertNotIn('仍不足', self.diagnosis()['stop_reason'])
-        self.assertIn('✅', self.p.post_message.call_args.kwargs['text'])
+        self.assertIn('✅', self.p.post_message.call_args.kwargs['title'])
 
     def test_failed_fallback_is_attempted_not_successfully_deleted(self):
         self.deleter.delete_selected.return_value = ([], ['failure'])
@@ -563,6 +563,130 @@ class ScannerFallbackTests(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertEqual(order, [])
         self.assertEqual(diagnosis['incomplete_series_skipped'], 2)
+
+
+class PushPresentationTests(unittest.TestCase):
+    """Exercise the payload sent to MoviePilot, not just a standalone formatter."""
+
+    def send(self, selected=None, **changes):
+        p = module.DiskSpaceAutoCleaner()
+        p._notify = True
+        p._scan_state = {}
+        p._current_strategy_name = '硬盘4-国产电视剧'
+        p._persist_config = MagicMock()
+        p.post_message = MagicMock()
+        diagnosis = dict(before_free_gb=14.95, after_free_gb=14.95,
+                         target_free_gb=50, actual_change_gb=-0.000001,
+                         stop_reason='保护/路径规则或累计删除上限限制；空间未明显增加 /secret token=PASSWORD',
+                         fallback_enabled=False, fallback_used=False, delete_errors=[],
+                         items_scanned=9999, cache_hits=200, tmdb_rating_used=30,
+                         candidate_depth=8, protected_skipped=400)
+        diagnosis.update(changes)
+        module.DiskSpaceNotifier(p).notify_report(
+            Path('/硬盘4'), 14.95, 1000, 1.495,
+            [candidate(1, 800)] if selected is None else selected, 35.05,
+            scan_paths=['/secret/media'], diagnosis=diagnosis,
+            strategy_name=p._current_strategy_name)
+        p.post_message.assert_called_once()
+        payload = p.post_message.call_args.kwargs
+        self.assertEqual(payload['mtype'], 'plugin')
+        self.assertGreaterEqual(len(payload['text'].splitlines()), 2)
+        self.assertLessEqual(len(payload['text'].splitlines()), 5)
+        for noisy in ('/硬盘4', '/secret', 'PASSWORD', '扫描', '缓存', 'TMDB',
+                      '候选深度', '保护跳过', '800', 'Traceback'):
+            self.assertNotIn(noisy, payload['title'] + payload['text'])
+        return payload
+
+    def test_supplied_report_is_short_and_does_not_claim_deletion_failed(self):
+        payload = self.send()
+        self.assertEqual(payload['title'], '⚠️ 硬盘4-国产电视剧 · 空间仍不足')
+        self.assertEqual(payload['text'], '剩余 14.95 GB / 目标 50.00 GB\n'
+                         '已删除1 项，空间变化 0.00 GB\n'
+                         '删除后空间未明显增加，可检查硬链接、快照或文件占用')
+        for word in ('删除失败', '兜底', '-0.00', '未释放'):
+            self.assertNotIn(word, payload['text'])
+
+    def test_success_uses_measured_delta_not_logical_size(self):
+        payload = self.send(after_free_gb=55, actual_change_gb=40.05)
+        self.assertIn('✅', payload['title'])
+        self.assertIn('40.05 GB', payload['text'])
+        self.assertNotIn('释放', payload['text'])
+
+    def test_unused_fallback_hidden_and_normal_target_retained(self):
+        payload = self.send(fallback_enabled=True, fallback_target_free_gb=20)
+        self.assertIn('50.00 GB', payload['text'])
+        self.assertNotIn('兜底', payload['text'])
+
+    def test_fallback_success_uses_safe_target(self):
+        payload = self.send(after_free_gb=20, actual_change_gb=5.05,
+                            fallback_used=True, fallback_safety_reached=True,
+                            fallback_target_free_gb=20)
+        self.assertIn('✅', payload['title'])
+        self.assertIn('已达安全水位', payload['title'])
+        self.assertIn('目标 20.00 GB', payload['text'])
+        self.assertIn('已尝试兜底', payload['text'])
+        self.assertNotIn('50.00', payload['text'])
+
+    def test_safety_reached_without_attempt_hides_fallback_label(self):
+        payload = self.send(after_free_gb=20, actual_change_gb=5.05,
+                            fallback_safety_reached=True, fallback_target_free_gb=20)
+        self.assertIn('目标 20.00 GB', payload['text'])
+        self.assertNotIn('尝试兜底', payload['text'])
+
+    def test_dry_run_planned_fallback_never_claims_deletion_or_release(self):
+        payload = self.send(dry_run=True, fallback_planned=True,
+                            fallback_target_free_gb=20, actual_change_gb=0)
+        self.assertIn('模拟建议（未删除）', payload['title'])
+        self.assertIn('建议删除1 项', payload['text'])
+        self.assertIn('目标 20.00 GB', payload['text'])
+        self.assertIn('计划尝试兜底清理（模拟）', payload['text'])
+        self.assertNotIn('已删除', payload['text'])
+        self.assertNotIn('失败', payload['text'])
+
+    def test_no_candidates_has_short_actionable_hint(self):
+        payload = self.send(selected=[], stop_reason='无候选（保护/路径规则过滤或扫描上限）')
+        self.assertIn('无可清理候选', payload['title'])
+        self.assertIn('保护规则/删除上限', payload['text'])
+        self.assertIn('已删除0 项', payload['text'])
+
+    def test_error_hides_raw_exception_and_unknown_metrics(self):
+        payload = self.send(selected=[], error=True, after_free_gb=None,
+                            actual_change_gb=None,
+                            stop_reason='Traceback /secret/media token=PASSWORD')
+        self.assertIn('清理异常', payload['title'])
+        self.assertIn('剩余 未知', payload['text'])
+        self.assertIn('空间变化 未知', payload['text'])
+        self.assertIn('查看日志', payload['text'])
+
+    def test_partial_failure_even_when_space_reaches_target(self):
+        payload = self.send(after_free_gb=60, actual_change_gb=45.05,
+                            delete_errors=['Traceback /secret token=PASSWORD'])
+        self.assertIn('清理部分完成', payload['title'])
+        self.assertIn('删除失败/保护复核跳过 1 项', payload['text'])
+        self.assertNotIn('✅', payload['title'])
+
+    def test_negative_delta_is_not_masked_or_called_deletion_failure(self):
+        payload = self.send(after_free_gb=12.95, actual_change_gb=-2)
+        self.assertIn('-2.00 GB', payload['text'])
+        self.assertIn('可检查并发写入', payload['text'])
+        self.assertNotIn('删除失败', payload['text'])
+        payload = self.send(actual_change_gb=-0.006)
+        self.assertIn('-0.01 GB', payload['text'])
+
+    def test_unknown_or_nonfinite_metrics_not_reported_as_shortage_or_zero(self):
+        for value in (None, float('nan'), float('inf')):
+            payload = self.send(after_free_gb=value, target_free_gb=value,
+                                actual_change_gb=value)
+            self.assertIn('空间状态待确认', payload['title'])
+            self.assertIn('剩余 未知 / 目标 未知', payload['text'])
+            self.assertIn('空间变化 未知', payload['text'])
+            self.assertNotIn('硬链接', payload['text'])
+
+    def test_full_detail_formatter_still_retains_diagnostics(self):
+        notifier = module.DiskSpaceNotifier(MagicMock())
+        diagnosis = dict(stop_reason='raw detailed reason /secret', items_scanned=456)
+        self.assertIn('raw detailed reason /secret', notifier.outcome_text(diagnosis, []))
+        self.assertIn('扫描456项', notifier.diagnosis_text(diagnosis))
 
 
 if __name__ == '__main__':
