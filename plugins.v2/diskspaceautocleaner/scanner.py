@@ -68,6 +68,7 @@ class DiskSpaceScanner:
         stop_event = threading.Event()
         shared_state = {
             "candidates": [],
+            "items_reserved": 0,
             "lock": threading.Lock(),
         }
 
@@ -163,7 +164,24 @@ class DiskSpaceScanner:
             return candidates, diagnosis
         
         try:
+            # Bound discovery independently of expensive sizing/TMDB work. Recent
+            # entries do not consume that work ahead of normal candidates.
+            discovered = []
             for child in self._iter_candidate_items(root, depth):
+                if len(discovered) >= max_items:
+                    break
+                if shared_state is not None:
+                    with shared_state["lock"]:
+                        if shared_state["items_reserved"] >= max_items:
+                            break
+                        shared_state["items_reserved"] += 1
+                discovered.append(child)
+            def priority(child):
+                try:
+                    return bool(recent_seconds and now - child.stat().st_mtime < recent_seconds)
+                except OSError:
+                    return False
+            for child in sorted(discovered, key=priority):
                 if stop_event and stop_event.is_set():
                     logger.info(f"提前停止扫描媒体根目录：{root}（已满足目标释放量）")
                     break
@@ -179,9 +197,15 @@ class DiskSpaceScanner:
                         continue
                     
                     stat = child.stat()
-                    if recent_seconds and now - stat.st_mtime < recent_seconds:
+                    is_recent = bool(recent_seconds and now - stat.st_mtime < recent_seconds)
+                    # 保留最近项供受控兜底阶段使用；正常阶段会明确排除它们。
+                    if is_recent:
                         diagnosis["recent_skipped"] += 1
-                        continue
+                        # Do not retain protected items in the scan result unless
+                        # the explicitly enabled fallback phase can consume them.
+                        if (not getattr(self._plugin, "_fallback_enabled", False)
+                                or now - stat.st_mtime < self._plugin._fallback_min_keep_days * 86400):
+                            continue
 
                     active_match_reason = self._match_active_media(child, active_titles)
                     if active_match_reason:
@@ -271,6 +295,10 @@ class DiskSpaceScanner:
                         "year_reason": year_reason,
                         "type": "目录" if child.is_dir() else "文件",
                         "activity_reason": recent_match_reason or "未命中播放保护/最近播放降权",
+                        "is_recent": is_recent,
+                        "recent_days_protect": int(self._plugin._recent_days_protect or 0),
+                        "fallback": False,
+                        "fallback_reason": "",
                     })
                     logger.info(
                         f"候选入列：{child.name}，体积={size_gb:.2f}GB，天数={age_days}，"
@@ -487,7 +515,7 @@ class DiskSpaceScanner:
         top_n = max(1, int(getattr(self._plugin, "_tmdb_top_n", 30) or 30))
         if not candidates:
             return
-        ranked = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        ranked = sorted(candidates, key=lambda x: (bool(x.get("is_recent")), -x.get("score", 0)))
         for item in ranked[:top_n]:
             path_text = item.get("path")
             if not path_text:

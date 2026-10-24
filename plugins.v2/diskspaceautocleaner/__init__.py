@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.25"
+    plugin_version = "3.9.26"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -42,6 +43,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _max_scan_items = 5000
     _candidate_depth = 2
     _recent_days_protect = 30
+    _fallback_enabled = False
+    _fallback_min_keep_days = 3
+    _fallback_buffer_gb = 5.0
     _max_delete_gb = 1000  # 每次删除的最大空间限制（GB）
     _protect_dirs = ""
     _protect_keywords = ""
@@ -87,14 +91,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._monitor_paths = config.get("monitor_paths") or ""
             self._media_paths = config.get("media_paths") or ""
             self._path_mappings = config.get("path_mappings") or ""
-            self._min_free_gb = DiskSpaceUtils.to_int(config.get("min_free_gb"), 5)
-            self._target_free_gb = DiskSpaceUtils.to_int(config.get("target_free_gb"), 30)
+            self._min_free_gb = self._config_number(config.get("min_free_gb"), 5, integer=True)
+            self._target_free_gb = self._config_number(config.get("target_free_gb"), 30, integer=True)
             self._scan_interval_minutes = DiskSpaceUtils.to_int(config.get("scan_interval_minutes"), 5)
-            self._max_candidates = DiskSpaceUtils.to_int(config.get("max_candidates"), 30)
-            self._max_scan_items = DiskSpaceUtils.to_int(config.get("max_scan_items"), 5000)
-            self._candidate_depth = DiskSpaceUtils.to_int(config.get("candidate_depth"), 2)
-            self._recent_days_protect = DiskSpaceUtils.to_int(config.get("recent_days_protect"), 30)
-            self._max_delete_gb = DiskSpaceUtils.to_int(config.get("max_delete_gb"), 1000)
+            self._max_candidates = self._config_number(config.get("max_candidates"), 30, integer=True)
+            self._max_scan_items = self._config_number(config.get("max_scan_items"), 5000, integer=True)
+            self._candidate_depth = self._config_number(config.get("candidate_depth"), 2, integer=True)
+            self._recent_days_protect = self._config_number(config.get("recent_days_protect"), 30, integer=True)
+            self._fallback_enabled = DiskSpaceUtils.to_bool(config.get("fallback_enabled"), False)
+            self._fallback_min_keep_days = self._config_number(config.get("fallback_min_keep_days"), 3, integer=True)
+            self._fallback_buffer_gb = self._config_number(config.get("fallback_buffer_gb"), 5.0)
+            self._max_delete_gb = self._config_number(config.get("max_delete_gb"), 1000, integer=True)
             self._protect_dirs = config.get("protect_dirs") or ""
             self._protect_keywords = config.get("protect_keywords") or ""
             self._history_limit = DiskSpaceUtils.to_int(config.get("history_limit"), 50)
@@ -258,14 +265,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 'monitor_path': monitor_paths[0] if monitor_paths else '',
                 'monitor_paths': monitor_paths,
                 'media_paths': media_paths,
-                'min_free_gb': DiskSpaceUtils.to_int(item.get('min_free_gb'), self._min_free_gb),
-                'target_free_gb': DiskSpaceUtils.to_int(item.get('target_free_gb'), self._target_free_gb),
-                'recent_days_protect': DiskSpaceUtils.to_int(item.get('recent_days_protect'), self._recent_days_protect),
+                'min_free_gb': self._config_number(item.get('min_free_gb'), self._min_free_gb, integer=True),
+                'target_free_gb': self._config_number(item.get('target_free_gb'), self._target_free_gb, integer=True),
+                'recent_days_protect': self._config_number(item.get('recent_days_protect'), self._recent_days_protect, integer=True),
+                'fallback_enabled': DiskSpaceUtils.to_bool(item.get('fallback_enabled'), self._fallback_enabled),
+                'fallback_min_keep_days': self._config_number(item.get('fallback_min_keep_days'), self._fallback_min_keep_days, integer=True),
+                'fallback_buffer_gb': self._config_number(item.get('fallback_buffer_gb'), self._fallback_buffer_gb),
                 'recent_play_days': DiskSpaceUtils.to_int(item.get('recent_play_days'), self._recent_play_days),
-                'max_delete_gb': DiskSpaceUtils.to_int(item.get('max_delete_gb'), self._max_delete_gb),
-                'candidate_depth': DiskSpaceUtils.to_int(item.get('candidate_depth'), self._candidate_depth),
-                'max_candidates': DiskSpaceUtils.to_int(item.get('max_candidates'), self._max_candidates),
-                'max_scan_items': DiskSpaceUtils.to_int(item.get('max_scan_items'), self._max_scan_items),
+                'max_delete_gb': self._config_number(item.get('max_delete_gb'), self._max_delete_gb, integer=True),
+                'candidate_depth': self._config_number(item.get('candidate_depth'), self._candidate_depth, integer=True),
+                'max_candidates': self._config_number(item.get('max_candidates'), self._max_candidates, integer=True),
+                'max_scan_items': self._config_number(item.get('max_scan_items'), self._max_scan_items, integer=True),
                 'tmdb_top_n': max(1, DiskSpaceUtils.to_int(item.get('tmdb_top_n'), self._tmdb_top_n)),
                 'prefer_release_year_lte': max(0, DiskSpaceUtils.to_int(item.get('prefer_release_year_lte'), self._prefer_release_year_lte)),
                 'prefer_release_year_bonus': DiskSpaceUtils.to_int(item.get('prefer_release_year_bonus'), self._prefer_release_year_bonus),
@@ -340,6 +350,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             '_min_free_gb': strategy.get('min_free_gb', self._min_free_gb),
             '_target_free_gb': strategy.get('target_free_gb', self._target_free_gb),
             '_recent_days_protect': strategy.get('recent_days_protect', self._recent_days_protect),
+            '_fallback_enabled': strategy.get('fallback_enabled', self._fallback_enabled),
+            '_fallback_min_keep_days': strategy.get('fallback_min_keep_days', self._fallback_min_keep_days),
+            '_fallback_buffer_gb': strategy.get('fallback_buffer_gb', self._fallback_buffer_gb),
             '_recent_play_days': strategy.get('recent_play_days', self._recent_play_days),
             '_max_delete_gb': strategy.get('max_delete_gb', self._max_delete_gb),
             '_candidate_depth': strategy.get('candidate_depth', self._candidate_depth),
@@ -440,7 +453,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if monitor_path:
                 lines.append(f"monitor_path={monitor_path}")
                 lines.append(f"monitor_paths={monitor_path}")
-            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "tmdb_top_n", "prefer_release_year_lte", "prefer_release_year_bonus"]:
+            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "fallback_enabled", "fallback_min_keep_days", "fallback_buffer_gb", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "tmdb_top_n", "prefer_release_year_lte", "prefer_release_year_bonus"]:
                 value = config.get(prefix + key)
                 if value is None or str(value).strip() == "":
                     continue
@@ -482,6 +495,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "min_free_gb": self._min_free_gb,
                 "target_free_gb": self._target_free_gb,
                 "recent_days_protect": template["recent_days_protect"],
+                "fallback_enabled": self._fallback_enabled,
+                "fallback_min_keep_days": self._fallback_min_keep_days,
+                "fallback_buffer_gb": self._fallback_buffer_gb,
                 "recent_play_days": template["recent_play_days"],
                 "max_delete_gb": template["max_delete_gb"],
                 "tmdb_top_n": self._tmdb_top_n,
@@ -500,6 +516,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "min_free_gb": item.get("min_free_gb", base["min_free_gb"]),
                     "target_free_gb": item.get("target_free_gb", base["target_free_gb"]),
                     "recent_days_protect": item.get("recent_days_protect", base["recent_days_protect"]),
+                    "fallback_enabled": item.get("fallback_enabled", base["fallback_enabled"]),
+                    "fallback_min_keep_days": item.get("fallback_min_keep_days", base["fallback_min_keep_days"]),
+                    "fallback_buffer_gb": item.get("fallback_buffer_gb", base["fallback_buffer_gb"]),
                     "recent_play_days": item.get("recent_play_days", base["recent_play_days"]),
                     "max_delete_gb": item.get("max_delete_gb", base["max_delete_gb"]),
                     "tmdb_top_n": item.get("tmdb_top_n", base["tmdb_top_n"]),
@@ -536,6 +555,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "min_free_gb", "label": "触发剩余GB", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "target_free_gb", "label": "目标剩余GB", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_days_protect", "label": "最近新增保护天数", "type": "number"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": prefix + "fallback_enabled", "label": "启用兜底清理", "hint": "正常候选不足时，仅放宽最近新增保护；默认关闭", "persistent-hint": True}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "fallback_min_keep_days", "label": "兜底最短保留天数", "type": "number", "hint": "兜底仍不会删除低于此天数的媒体"}}]},
+                                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "fallback_buffer_gb", "label": "兜底安全缓冲GB", "type": "number", "hint": "兜底只恢复到触发线加此缓冲，仍共用删除上限"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_play_days", "label": "最近播放降权天数", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_delete_gb", "label": "每次删除最大GB", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "hint": "只对前 N 个初筛候选做 TMDB 评分修正"}}]},
@@ -661,6 +683,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             data[prefix + "min_free_gb"] = strategy.get("min_free_gb", self._min_free_gb)
             data[prefix + "target_free_gb"] = strategy.get("target_free_gb", self._target_free_gb)
             data[prefix + "recent_days_protect"] = strategy.get("recent_days_protect", self._recent_days_protect)
+            data[prefix + "fallback_enabled"] = strategy.get("fallback_enabled", self._fallback_enabled)
+            data[prefix + "fallback_min_keep_days"] = strategy.get("fallback_min_keep_days", self._fallback_min_keep_days)
+            data[prefix + "fallback_buffer_gb"] = strategy.get("fallback_buffer_gb", self._fallback_buffer_gb)
             data[prefix + "recent_play_days"] = strategy.get("recent_play_days", self._recent_play_days)
             data[prefix + "max_delete_gb"] = strategy.get("max_delete_gb", self._max_delete_gb)
             data[prefix + "tmdb_top_n"] = strategy.get("tmdb_top_n", self._tmdb_top_n)
@@ -1341,11 +1366,36 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if schedule_next and self._enabled:
                 self._schedule_next(initial=False)
 
+    @staticmethod
+    def _config_number(value, default, integer=False):
+        if value is None:
+            return default
+        try:
+            number = float(value)
+            if not math.isfinite(number) or (integer and not number.is_integer()):
+                return float("nan")
+            return int(number) if integer else number
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+
     def _validate_cleanup_config(self):
+        for field in ("min_free_gb", "target_free_gb", "max_delete_gb", "max_candidates",
+                      "max_scan_items", "candidate_depth", "recent_days_protect",
+                      "fallback_min_keep_days", "fallback_buffer_gb"):
+            if not math.isfinite(float(getattr(self, "_" + field))):
+                raise ValueError(f"无效数值：{field}")
+        if self._candidate_depth <= 0 or self._recent_days_protect < 0:
+            raise ValueError("扫描深度必须为正，保护天数不得为负")
+
         if self._min_free_gb < 0 or self._target_free_gb <= self._min_free_gb:
             raise ValueError("目标剩余空间必须大于触发阈值，触发阈值不得为负")
         if self._max_delete_gb <= 0 or self._max_candidates <= 0 or self._max_scan_items <= 0:
             raise ValueError("删除空间上限、候选数量上限及扫描上限必须为正数")
+        if (not math.isfinite(float(self._fallback_buffer_gb)) or self._fallback_min_keep_days < 0
+                or self._fallback_buffer_gb <= 0):
+            raise ValueError("兜底最短保留天数不得为负，兜底缓冲GB必须大于0")
+        if self._fallback_enabled and self._fallback_min_keep_days >= self._recent_days_protect:
+            raise ValueError("兜底最短保留天数必须小于正常保护天数")
 
     def _check_space_and_report(self):
         if not self._enabled:
@@ -1374,17 +1424,39 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     size_cache_lock=self._size_cache_lock, target_release_gb=needed_gb)
                 deleted, delete_errors = [], []
                 after_gb = free_gb
+                # Never accept phase/capability metadata from history or callers.
+                candidates = [dict(x) for x in candidates]
+                for item in candidates:
+                    for key in ("fallback", "fallback_candidate", "_fallback_token", "fallback_reason", "fallback_min_keep_days"):
+                        item.pop(key, None)
+                normal = [x for x in candidates if not x.get("is_recent")]
+                fallback = []
+                if self._fallback_enabled:
+                    self._fallback_run_token = object()
+                    fallback = [x for x in candidates if x.get("is_recent") and int(x.get("age_days") or 0) >= self._fallback_min_keep_days]
+                    fallback.sort(key=lambda x: (-(int(x.get("age_days") or 0)), -float(x.get("score") or 0)))
+                    for item in fallback:
+                        item.update(fallback=True, _fallback_token=self._fallback_run_token,
+                                    fallback_min_keep_days=self._fallback_min_keep_days,
+                                    fallback_reason=f"正常保护{self._recent_days_protect}天未达目标，兜底放宽至最短{self._fallback_min_keep_days}天")
+                ordered = normal + fallback
+                safe_target = min(self._target_free_gb, self._min_free_gb + self._fallback_buffer_gb)
                 if self._dry_run:
-                    selected = self._select_candidates(candidates, needed_gb)
-                    reason = "仅模拟，未删除；已生成建议" if selected else "仅模拟，未删除；无候选（保护/路径规则或上限限制）"
-                    result = {"attempted_count": 0, "charged_gb": 0}
+                    # Suggestions follow the same phase order and stop at the
+                    # normal target, or the fallback safety watermark only.
+                    selected = self._plan_candidates(ordered, free_gb, safe_target)
+                    reason = "仅模拟，未删除；已生成正常/兜底建议（预计值不保证真实释放）" if selected else "仅模拟，未删除；无候选（保护/路径规则或上限限制）"
+                    result = {"attempted_count": 0, "charged_gb": 0, "fallback_enabled": self._fallback_enabled, "fallback_used": False, "fallback_planned": any(x.get("fallback") for x in selected), "fallback_min_keep_days": self._fallback_min_keep_days, "fallback_target_free_gb": safe_target}
                 else:
-                    deleted, delete_errors, after_gb, reason, result = self._delete_until_target(
-                        mpath, candidates, scan_paths, free_gb, deleter)
+                    deleted, delete_errors, after_gb, reason, result = self._delete_until_target(mpath, ordered, scan_paths, free_gb, deleter, fallback_target=safe_target)
                     selected = deleted
                 diagnosis.update(result)
                 diagnosis.update({"before_free_gb": free_gb, "after_free_gb": after_gb,
                                   "target_free_gb": self._target_free_gb,
+                                  "fallback_enabled": self._fallback_enabled,
+                                  "fallback_min_keep_days": self._fallback_min_keep_days,
+                                  "fallback_target_free_gb": safe_target,
+
                                   "actual_change_gb": after_gb - free_gb, "stop_reason": reason,
                                   "delete_errors": delete_errors, "dry_run": self._dry_run})
                 key = self._current_strategy_name or mpath.as_posix()
@@ -1407,17 +1479,50 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 notifier.notify_report(mpath, free_gb, total_gb, free_percent, [], 0,
                                        diagnosis=diagnosis, strategy_name=self._current_strategy_name)
             finally:
+                self._fallback_run_token = None
                 self._restore_strategy_context(previous)
 
-    def _delete_until_target(self, monitor_path, candidates, scan_paths, before_gb, deleter):
+    def _plan_candidates(self, candidates, before_gb, fallback_target):
+        selected, seen = [], set()
+        total = 0.0
+        for item in candidates:
+            target = fallback_target if item.get("fallback") else self._target_free_gb
+            if before_gb + total >= target or len(selected) >= self._max_candidates:
+                break
+            path = os.path.normpath(item["path"])
+            if path in seen:
+                continue
+            seen.add(path)
+            size = float(item.get("size_gb") or 0)
+            if not math.isfinite(size) or size <= 0 or total + size > self._max_delete_gb:
+                continue
+            selected.append(item)
+            total += size
+        return selected
+
+    def _delete_until_target(self, monitor_path, candidates, scan_paths, before_gb, deleter, fallback_target=None):
         deleted, errors = [], []
         charged_bytes = attempts = skipped = 0
         after_gb = before_gb
         budget_bytes = int(self._max_delete_gb * 1024 ** 3)
         reason = "无候选（保护/路径规则过滤或扫描上限）"
+        fallback_reached = False
+        fallback_attempts = 0
+        seen = set()
         for item in candidates:
-            if after_gb >= self._target_free_gb:
-                reason = "实际剩余空间已达目标"
+            path = os.path.normpath(item["path"])
+            if path in seen:
+                continue
+            seen.add(path)
+            if item.get("fallback") and not self._fallback_enabled:
+                continue
+            target = fallback_target if item.get("fallback") and fallback_target is not None else self._target_free_gb
+            if item.get("fallback") and fallback_target is not None and after_gb >= fallback_target:
+                fallback_reached = True
+                reason = "实际剩余空间已达兜底安全水位"
+                break
+            if after_gb >= target:
+                reason = "实际剩余空间已达兜底安全水位" if item.get("fallback") else "实际剩余空间已达目标"
                 break
             if attempts >= self._max_candidates:
                 reason = "已达尝试数量上限，空间仍不足"
@@ -1435,6 +1540,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             # never refund budget or candidate slots.
             charged_bytes += size
             attempts += 1
+            fallback_attempts += bool(item.get("fallback"))
             try:
                 done, item_errors = deleter.delete_selected([item], scan_paths=scan_paths)
                 deleted.extend(done)
@@ -1444,11 +1550,16 @@ class DiskSpaceAutoCleaner(_PluginBase):
             # A failed removal may still release space; an unreadable disk stops
             # this disk rather than continuing without feedback.
             after_gb = shutil.disk_usage(monitor_path).free / 1024 ** 3
-            if after_gb >= self._target_free_gb:
-                reason = "实际剩余空间已达目标"
+            if after_gb >= target:
+                fallback_reached = bool(item.get("fallback"))
+                reason = "实际剩余空间已达兜底安全水位" if item.get("fallback") else "实际剩余空间已达目标"
                 break
             reason = "候选耗尽，空间仍不足"
-        if after_gb < self._target_free_gb:
+        if fallback_reached:
+            # Reaching the fallback watermark is an intentional safe outcome,
+            # not an unsatisfied-target budget warning.
+            pass
+        elif after_gb < self._target_free_gb:
             if attempts >= self._max_candidates or charged_bytes >= budget_bytes:
                 reason = "已达累计删除/尝试数量上限，空间仍不足"
             elif skipped:
@@ -1458,7 +1569,9 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if attempts and after_gb - before_gb < 0.01:
                 reason += "；删除尝试后空间未明显增加（硬链接/快照/占用或删除失败）"
         return deleted, errors, after_gb, reason, {"attempted_count": attempts,
-                "charged_gb": charged_bytes / 1024 ** 3, "limit_skipped": skipped}
+                "charged_gb": charged_bytes / 1024 ** 3, "limit_skipped": skipped,
+                "fallback_attempted_count": fallback_attempts, "fallback_used": bool(fallback_attempts),
+                "fallback_safety_reached": fallback_reached}
 
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
@@ -1787,4 +1900,8 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "year_reason": item.get("year_reason"),
             "type": item.get("type"),
             "activity_reason": item.get("activity_reason"),
+            "is_recent": bool(item.get("is_recent")),
+            "fallback": bool(item.get("fallback")),
+            "fallback_reason": item.get("fallback_reason"),
+            "fallback_min_keep_days": item.get("fallback_min_keep_days"),
         }

@@ -43,7 +43,7 @@ class DiskSpaceNotifier:
             return "未知" if value is None else f"{value:.2f}GB"
         before = diagnosis.get("before_free_gb")
         after = diagnosis.get("after_free_gb")
-        target = diagnosis.get("target_free_gb")
+        target = diagnosis.get("fallback_target_free_gb") if (diagnosis.get("fallback_used") or diagnosis.get("fallback_safety_reached")) else diagnosis.get("target_free_gb")
         if diagnosis.get("error"):
             status = "⚠️ 检查/清理异常"
         elif diagnosis.get("dry_run"):
@@ -56,6 +56,7 @@ class DiskSpaceNotifier:
                 f"\n实际空间变化：{space(diagnosis.get('actual_change_gb'))}；"
                 f"{'建议' if diagnosis.get('dry_run') else '成功删除'}：{len(selected)}项"
                 f"\n停止原因：{diagnosis.get('stop_reason', '未知')}"
+                f"\n兜底清理：{('模拟计划（未执行）' if diagnosis.get('fallback_planned') else '已启用/已使用' if diagnosis.get('fallback_used') else ('已启用但未使用' if diagnosis.get('fallback_enabled') else '未启用'))}"
                 f"\n删除失败/复核跳过：{len(diagnosis.get('delete_errors') or [])}项")
 
     def group_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -115,6 +116,9 @@ class DiskSpaceNotifier:
             f"缺失路径{diagnosis.get('roots_missing', 0)}",
             f"候选深度{diagnosis.get('candidate_depth', '')}",
         ]
+        if diagnosis.get("fallback_enabled"):
+            state = "模拟计划" if diagnosis.get("fallback_planned") else ("已尝试" if diagnosis.get("fallback_used") else "已启用未使用")
+            parts.append(f"兜底状态：{state}；最短保留{diagnosis.get('fallback_min_keep_days', '未知')}天；安全水位{diagnosis.get('fallback_target_free_gb', '未知')}GB")
         # 添加扫描时间统计
         scan_time = diagnosis.get('scan_time_seconds', 0)
         if scan_time:

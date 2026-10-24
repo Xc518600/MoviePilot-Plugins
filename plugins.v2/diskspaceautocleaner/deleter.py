@@ -57,6 +57,14 @@ class DiskSpaceDeleter:
         preflight can atomically freeze an actively changing media directory.
         """
         path = Path(item["path"])
+        # Fallback authorization is an in-memory per-run capability, never a
+        # persisted/UI boolean.  Validate it before touching filesystem state.
+        if item.get("fallback") is True:
+            if (not getattr(self._plugin, "_fallback_enabled", False)
+                    or getattr(self._plugin, "_fallback_run_token", None) is None
+                    or item.get("_fallback_token") is not self._plugin._fallback_run_token
+                    or int(item.get("fallback_min_keep_days", -1)) != int(getattr(self._plugin, "_fallback_min_keep_days", -2))):
+                raise ValueError("兜底候选标记无效")
         resolved = path.resolve(strict=True)
         roots = [Path(p).resolve(strict=True) for p in scan_paths]
         if path.is_symlink() or not any(resolved != r and DiskSpaceUtils.is_relative_to(resolved, r) for r in roots):
@@ -77,7 +85,11 @@ class DiskSpaceDeleter:
             if not node.is_file():
                 raise ValueError("非普通文件")
             return stat.st_size
-        if self._plugin._recent_days_protect > 0 and time.time() - path.stat().st_mtime < self._plugin._recent_days_protect * 86400:
+        protect_days = int(self._plugin._recent_days_protect or 0)
+        # 仅接受扫描器在本轮可信标记的兜底候选，且保留策略最短天数。
+        if item.get("fallback") is True:
+            protect_days = int(getattr(self._plugin, "_fallback_min_keep_days", protect_days))
+        if protect_days > 0 and time.time() - path.stat().st_mtime < protect_days * 86400:
             raise ValueError("命中最近修改保护")
         return measure(resolved)
 

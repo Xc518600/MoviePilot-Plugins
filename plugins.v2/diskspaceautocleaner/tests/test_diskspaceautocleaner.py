@@ -244,5 +244,326 @@ class CleanerTests(unittest.TestCase):
         self.assertFalse(self.p._check_running)
 
 
+class FallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.p = module.DiskSpaceAutoCleaner()
+        self.p._enabled = True
+        self.p._dry_run = False
+        self.p._notify = True
+        self.p._monitor_paths = '/mock/disk'
+        self.p._media_paths = '/mock/media'
+        self.p._strategy_profiles = ''
+        self.p._scan_state = {}
+        self.p._strategy_scan_totals = {}
+        self.p._max_candidates = 30
+        self.p._max_delete_gb = 1000
+        self.p._min_free_gb = 10
+        self.p._target_free_gb = 30
+        self.p._recent_days_protect = 30
+        self.p._fallback_enabled = False
+        self.p._fallback_min_keep_days = 3
+        self.p._fallback_buffer_gb = 5.0
+        self.p._check_running = False
+        self.p._lock = threading.Lock()
+        self.p._save_record = MagicMock()
+        self.p._persist_config = MagicMock()
+        self.p.post_message = MagicMock()
+        self.deleter = MagicMock()
+        self.deleter.measure_for_budget.side_effect = lambda item, *args: item['size']
+        self.deleter.delete_selected.side_effect = lambda items, **kwargs: (items, [])
+
+    def test_defaults_and_legacy_strategy_are_compatible(self):
+        strategy = self.p._parse_strategy_profiles()
+        self.assertEqual(strategy, [])
+        defaults = self.p._strategy_form_defaults('')
+        self.assertFalse(defaults[0]['fallback_enabled'])
+        self.assertEqual(defaults[0]['fallback_min_keep_days'], 3)
+        self.assertEqual(defaults[0]['fallback_buffer_gb'], 5.0)
+        text = self.p._build_strategy_profiles_from_form({
+            'strategy_1_name': 'x', 'strategy_1_monitor_path': '/mock/disk',
+            'strategy_1_media_paths': '/mock/media', 'strategy_1_recent_days_protect': 30,
+        })
+        self.assertNotIn('fallback_enabled=', text)
+        self.assertFalse(self.p._parse_strategy_profiles())
+
+    def test_form_round_trip_contains_fallback_fields(self):
+        values = {'strategy_1_name': 'x', 'strategy_1_monitor_path': '/mock/disk',
+                  'strategy_1_media_paths': '/mock/media', 'strategy_1_fallback_enabled': True,
+                  'strategy_1_fallback_min_keep_days': 5, 'strategy_1_fallback_buffer_gb': 2.5,
+                  'strategy_1_recent_days_protect': 30}
+        text = self.p._build_strategy_profiles_from_form(values)
+        self.assertIn('fallback_enabled=True', text)
+        self.assertIn('fallback_min_keep_days=5', text)
+        self.assertIn('fallback_buffer_gb=2.5', text)
+        parsed = self.p._parse_strategy_profiles()
+        # The form builder returns text but does not mutate config; parse the result explicitly.
+        self.p._strategy_profiles = text
+        parsed = self.p._parse_strategy_profiles()
+        self.assertTrue(parsed[0]['fallback_enabled'])
+        self.assertEqual(parsed[0]['fallback_min_keep_days'], 5)
+        self.assertEqual(parsed[0]['fallback_buffer_gb'], 2.5)
+
+    def test_normal_candidates_precede_fallback_and_fallback_is_sorted_by_age(self):
+        normal = candidate(1); normal.update(is_recent=False, age_days=100)
+        recent_old = candidate(2); recent_old.update(is_recent=True, age_days=20, fallback=True)
+        recent_new = candidate(3); recent_new.update(is_recent=True, age_days=25, fallback=True)
+        candidates = [normal, recent_old, recent_new]
+        self.p._fallback_enabled = True
+        self.p._fallback_min_keep_days = 3
+        self.p._fallback_buffer_gb = 5
+        calls = []
+        self.deleter.delete_selected.side_effect = lambda items, **kwargs: (calls.append(items[0]['name']) or (items, []))
+        with patch.object(module.shutil, 'disk_usage', side_effect=[usage(5), usage(15), usage(25), usage(30)]):
+            self.p._delete_until_target('/mock/disk', [normal, recent_new, recent_old], ['/mock/media'], 5, self.deleter, fallback_target=15)
+        # The helper receives the already ordered list; verify its shared-budget/stop behavior.
+        self.assertEqual(calls, ['1', '3'])
+
+    def test_fallback_candidates_respect_minimum_keep_days_and_hard_flags(self):
+        self.p._fallback_enabled = True
+        self.p._fallback_min_keep_days = 3
+        too_new = candidate(1); too_new.update(is_recent=True, age_days=2)
+        valid = candidate(2); valid.update(is_recent=True, age_days=5)
+        self.assertEqual([x['name'] for x in [too_new, valid] if x.get('is_recent') and x['age_days'] >= self.p._fallback_min_keep_days], ['2'])
+        # Deleter rejects a forged/non-current fallback marker even when age looks valid.
+        from cleaner_under_test.deleter import DiskSpaceDeleter
+        with patch.object(Path, 'resolve', lambda node, **kw: node):
+            with self.assertRaises(ValueError):
+                DiskSpaceDeleter(self.p).measure_for_budget(dict(valid, fallback=True, fallback_candidate=False,
+                                                                fallback_min_keep_days=3), ['/mock/media'], Path('/mock/disk'))
+
+    def test_shared_budget_charges_normal_and_fallback_without_reset(self):
+        self.p._fallback_enabled = True
+        self.p._max_delete_gb = 15
+        normal = candidate(1, 10); normal.update(is_recent=False)
+        fallback = candidate(2, 10); fallback.update(fallback=True, fallback_candidate=True,
+                                                       fallback_min_keep_days=3)
+        with patch.object(module.shutil, 'disk_usage', side_effect=[usage(5), usage(5), usage(5)]):
+            _, errors, _, reason, result = self.p._delete_until_target('/mock/disk', [normal, fallback],
+                ['/mock/media'], 5, self.deleter, fallback_target=15)
+        self.assertEqual(self.deleter.delete_selected.call_count, 1)
+        self.assertEqual(result['charged_gb'], 10)
+        self.assertIn('上限', reason)
+
+    def test_notification_reports_fallback_state_and_watermark(self):
+        notifier = module.DiskSpaceNotifier(self.p)
+        text = notifier.outcome_text({
+            'before_free_gb': 5, 'after_free_gb': 15, 'target_free_gb': 30,
+            'fallback_enabled': True, 'fallback_used': True,
+            'fallback_min_keep_days': 3, 'fallback_target_free_gb': 15,
+            'stop_reason': '实际剩余空间已达兜底安全水位', 'delete_errors': []}, [])
+        self.assertIn('兜底清理：已启用/已使用', text)
+        self.assertIn('安全水位15GB', notifier.diagnosis_text({
+            'fallback_enabled': True, 'fallback_used': True, 'fallback_min_keep_days': 3,
+            'fallback_target_free_gb': 15}))
+
+
+class PipelineFallbackTests(unittest.TestCase):
+    run_check = CleanerTests.run_check
+
+    def setUp(self):
+        CleanerTests.setUp(self)
+        self.p._min_free_gb = 10
+        self.p._target_free_gb = 30
+        self.p._recent_days_protect = 30
+        self.p._fallback_enabled = True
+        self.p._fallback_min_keep_days = 3
+        self.p._fallback_buffer_gb = 5
+
+    def recent(self, n, age=20, size=5):
+        return dict(candidate(n, size), is_recent=True, age_days=age)
+
+    def diagnosis(self):
+        return self.p._save_record.call_args.kwargs['diagnosis']
+
+    def test_pipeline_order_age_minimum_and_safety_stop(self):
+        self.run_check([self.recent(1, 10), self.recent(2, 29), self.recent(3, 1), candidate(4, 2)],
+                       [usage(5), usage(6), usage(10), usage(15)])
+        names = [c.args[0][0]['name'] for c in self.deleter.delete_selected.call_args_list]
+        self.assertEqual(names, ['4', '2', '1'])
+        self.assertEqual(self.diagnosis()['fallback_attempted_count'], 2)
+        self.assertTrue(self.diagnosis()['fallback_used'])
+        self.assertIn('安全水位', self.diagnosis()['stop_reason'])
+
+    def test_disabled_cannot_be_enabled_by_candidate_metadata(self):
+        self.p._fallback_enabled = False
+        self.run_check([dict(self.recent(1), fallback=True, fallback_candidate=True)], [usage(5)])
+        self.deleter.delete_selected.assert_not_called()
+        self.assertFalse(self.diagnosis()['fallback_used'])
+
+    def test_normal_achieves_safety_no_fallback_attempt(self):
+        self.run_check([candidate(1), self.recent(2)], [usage(5), usage(15)])
+        self.assertEqual(self.deleter.delete_selected.call_count, 1)
+        self.assertFalse(self.diagnosis()['fallback_used'])
+        self.assertIn('安全水位', self.diagnosis()['stop_reason'])
+
+    def test_safety_at_exact_budget_is_not_overwritten(self):
+        self.p._max_delete_gb = 5
+        self.p._max_candidates = 1
+        self.run_check([self.recent(1)], [usage(5), usage(15)])
+        self.assertIn('安全水位', self.diagnosis()['stop_reason'])
+        self.assertNotIn('仍不足', self.diagnosis()['stop_reason'])
+        self.assertIn('✅', self.p.post_message.call_args.kwargs['text'])
+
+    def test_failed_fallback_is_attempted_not_successfully_deleted(self):
+        self.deleter.delete_selected.return_value = ([], ['failure'])
+        self.deleter.delete_selected.side_effect = None
+        self.run_check([self.recent(1)], [usage(5), usage(5)])
+        self.assertTrue(self.diagnosis()['fallback_used'])
+        self.assertEqual(self.diagnosis()['fallback_attempted_count'], 1)
+        self.assertIn('仍不足', self.diagnosis()['stop_reason'])
+
+    def test_failure_normal_charges_budget_and_attempts_across_phases(self):
+        self.p._max_candidates = 2
+        self.p._max_delete_gb = 10
+        self.deleter.delete_selected.side_effect = lambda *a, **kw: ([], ['failure'])
+        self.run_check([candidate(1, 5), self.recent(2), self.recent(3)], [usage(5), usage(5), usage(5)])
+        self.assertEqual(self.diagnosis()['charged_gb'], 10)
+        self.assertEqual(self.diagnosis()['attempted_count'], 2)
+        self.assertEqual(self.diagnosis()['fallback_attempted_count'], 1)
+
+    def test_duplicate_path_not_charged_or_retried_across_phases(self):
+        self.run_check([candidate(1, 5), candidate(1, 5), self.recent(1), self.recent(2)],
+                       [usage(5), usage(5), usage(15)])
+        self.assertEqual(self.deleter.delete_selected.call_count, 2)
+        self.assertEqual(self.diagnosis()['charged_gb'], 10)
+
+    def test_dry_run_only_fallback_safe_target_budget_and_plan_status(self):
+        self.p._dry_run = True
+        self.run_check([self.recent(1), self.recent(2), self.recent(3)], [usage(5)])
+        selected = self.p._save_record.call_args.args[4]
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(self.diagnosis()['fallback_planned'])
+        self.assertFalse(self.diagnosis()['fallback_used'])
+        self.deleter.delete_selected.assert_not_called()
+        self.p._max_delete_gb = 5
+        self.assertEqual(len(self.p._plan_candidates([self.recent(4), self.recent(5)], 5, 15)), 1)
+
+    def test_dry_run_normal_phase_still_uses_normal_target(self):
+        self.p._dry_run = True
+        self.run_check([candidate(1), candidate(2), candidate(3), self.recent(4)], [usage(5)])
+        self.assertEqual(len(self.p._save_record.call_args.args[4]), 3)
+        self.assertFalse(self.diagnosis()['fallback_planned'])
+
+    def test_token_is_per_run_not_serialized_and_cleared(self):
+        self.run_check([self.recent(1)], [usage(5), usage(15)])
+        item = self.deleter.delete_selected.call_args.args[0][0]
+        self.assertIsNotNone(item['_fallback_token'])
+        self.assertIsNone(self.p._fallback_run_token)
+        serialized = self.p._serialize_candidate(item)
+        self.assertNotIn('_fallback_token', serialized)
+        self.assertNotIn('fallback_candidate', serialized)
+
+    def test_invalid_numbers_fail_closed_per_strategy(self):
+        for field, value in [('fallback_buffer_gb', 'nan'), ('fallback_buffer_gb', 'inf'),
+                             ('fallback_buffer_gb', 'garbage'), ('fallback_buffer_gb', '0'),
+                             ('max_delete_gb', 'inf'), ('max_candidates', 'nan'),
+                             ('fallback_min_keep_days', '-1'), ('fallback_min_keep_days', '30')]:
+            with self.subTest(field=field, value=value):
+                self.deleter.reset_mock()
+                self.p._strategy_profiles = (f'name=bad\nmonitor_path=/mock/a\n{field}={value}\n\n'
+                                             'name=good\nmonitor_path=/mock/b\nfallback_enabled=False')
+                self.p._monitor_paths = ''
+                scanner = self.run_check([candidate(1)], [usage(5), usage(5), usage(30)])
+                self.assertEqual(scanner.build_candidates.call_count, 1)
+                self.assertEqual(self.deleter.delete_selected.call_count, 1)
+                self.assertTrue(self.p._fallback_enabled)  # context restored
+
+
+class HardProtectionFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.p = module.DiskSpaceAutoCleaner()
+        self.p._fallback_enabled = True
+        self.p._fallback_min_keep_days = 3
+        self.p._recent_days_protect = 30
+        self.p._fallback_run_token = object()
+        self.p._protect_dirs = ''
+        self.p._protect_keywords = ''
+        self.item = dict(candidate(1), fallback=True, fallback_min_keep_days=3,
+                         _fallback_token=self.p._fallback_run_token)
+        self.deleter = module.DiskSpaceDeleter(self.p)
+
+    def test_forged_absent_stale_and_disabled_capabilities_rejected_before_io(self):
+        for token in [None, True, object(), 'token']:
+            with self.subTest(token=token), patch.object(Path, 'stat', side_effect=AssertionError('no I/O')):
+                with self.assertRaises(ValueError):
+                    self.deleter.measure_for_budget(dict(self.item, _fallback_token=token), ['/mock/media'], Path('/mock'))
+        self.p._fallback_enabled = False
+        with self.assertRaises(ValueError):
+            self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock'))
+
+    def test_valid_token_still_enforces_keep_age_path_keyword_symlink_crossdisk(self):
+        import time
+        def stat(node):
+            return types.SimpleNamespace(st_dev=7, st_size=100, st_mtime=time.time()-4*86400)
+        with patch.object(Path, 'resolve', lambda node, **kw: node), \
+             patch.object(Path, 'is_symlink', return_value=False), \
+             patch.object(Path, 'stat', stat), patch.object(Path, 'lstat', stat), \
+             patch.object(Path, 'is_dir', return_value=False), patch.object(Path, 'is_file', return_value=True):
+            self.assertEqual(self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock')), 100)
+            for field, value in [('_protect_dirs', '/mock/media/1'), ('_protect_keywords', '1')]:
+                setattr(self.p, field, value)
+                with self.assertRaises(ValueError):
+                    self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock'))
+                setattr(self.p, field, '')
+            with patch.object(Path, 'stat', return_value=types.SimpleNamespace(st_dev=7, st_mtime=time.time()-86400)):
+                with self.assertRaises(ValueError):
+                    self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock'))
+            with patch.object(Path, 'is_symlink', return_value=True):
+                with self.assertRaises(ValueError):
+                    self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock'))
+            with patch.object(Path, 'lstat', return_value=types.SimpleNamespace(st_dev=8)):
+                with self.assertRaises(ValueError):
+                    self.deleter.measure_for_budget(self.item, ['/mock/media'], Path('/mock'))
+
+
+class ScannerFallbackTests(unittest.TestCase):
+    def scan(self, enabled=True, active=False, complete=True):
+        import time
+        p = module.DiskSpaceAutoCleaner()
+        p._fallback_enabled = enabled
+        p._fallback_min_keep_days = 3
+        p._recent_days_protect = 30
+        p._protect_dirs = ''
+        p._protect_keywords = ''
+        p._max_scan_items = 5
+        scanner = module.DiskSpaceScanner(p)
+        paths = [Path('/mock/media/recent'), Path('/mock/media/normal'), Path('/mock/media/new')]
+        ages = {'recent': 20, 'normal': 60, 'new': 1}
+        order = []
+        def stat(node):
+            return types.SimpleNamespace(st_mtime=time.time()-ages.get(node.name, 60)*86400)
+        with patch.object(Path, 'exists', return_value=True), patch.object(Path, 'is_dir', return_value=True), \
+             patch.object(Path, 'stat', stat), \
+             patch.object(scanner, '_iter_candidate_items', return_value=iter(paths)), \
+             patch.object(scanner, '_match_active_media', side_effect=lambda child, _: 'active' if active and child.name == 'recent' else ''), \
+             patch.object(scanner, '_match_recent_media', return_value=''), \
+             patch.object(module.DiskSpaceUtils, 'is_safe_root', return_value=True), \
+             patch.object(module.DiskSpaceUtils, 'is_series_candidate', return_value=not complete), \
+             patch.object(module.DiskSpaceUtils, 'is_completed_complete_series', return_value=(False, 'incomplete')), \
+             patch.object(module.DiskSpaceUtils, 'calc_path_size_fast', side_effect=lambda child, _: order.append(child.name) or GIB):
+            result, diagnosis = scanner._scan_media_root(Path('/mock/media'), 2, time.time(), 30*86400,
+                5, [], [], {}, threading.Lock(), active_titles=set(), recent_titles=set())
+        return result, diagnosis, order
+
+    def test_off_skips_recent_before_sizing(self):
+        result, _, order = self.scan(enabled=False)
+        self.assertEqual(order, ['normal'])
+        self.assertEqual([x['name'] for x in result], ['normal'])
+
+    def test_normal_sized_first_minimum_age_enforced(self):
+        result, _, order = self.scan()
+        self.assertEqual(order, ['normal', 'recent'])
+        self.assertEqual([x['name'] for x in result], ['normal', 'recent'])
+
+    def test_active_and_incomplete_remain_hard_protections(self):
+        result, diagnosis, order = self.scan(active=True)
+        self.assertEqual(order, ['normal'])
+        self.assertEqual(diagnosis['active_play_skipped'], 1)
+        result, diagnosis, order = self.scan(complete=False)
+        self.assertEqual(result, [])
+        self.assertEqual(order, [])
+        self.assertEqual(diagnosis['incomplete_series_skipped'], 2)
+
+
 if __name__ == '__main__':
     unittest.main()
