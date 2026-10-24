@@ -50,6 +50,37 @@ class DiskSpaceDeleter:
         except Exception:
             return 0
     
+    def measure_for_budget(self, item, scan_paths, monitor_path):
+        """Uncached logical bytes, fail closed on errors/links/mount boundaries.
+
+        Concurrent external writers must be excluded by the operator; no userspace
+        preflight can atomically freeze an actively changing media directory.
+        """
+        path = Path(item["path"])
+        resolved = path.resolve(strict=True)
+        roots = [Path(p).resolve(strict=True) for p in scan_paths]
+        if path.is_symlink() or not any(resolved != r and DiskSpaceUtils.is_relative_to(resolved, r) for r in roots):
+            raise ValueError("不允许符号链接、扫描根自身或边界外路径")
+        protect = [str(Path(p).resolve()) for p in DiskSpaceUtils.lines(self._plugin._protect_dirs)]
+        keywords = DiskSpaceUtils.lines(self._plugin._protect_keywords)
+        device = Path(monitor_path).stat().st_dev
+        def measure(node):
+            stat = node.lstat()
+            if node.is_symlink() or stat.st_dev != device:
+                raise ValueError("符号链接或跨盘/挂载点")
+            if not DiskSpaceUtils.is_safe_root(node, protect, keywords):
+                raise ValueError("命中保护路径/关键词")
+            if node.is_dir():
+                # Protect descendants too: deleting an ancestor must not bypass
+                # protected subdirectories or recent-file protection.
+                return sum(measure(child) for child in node.iterdir())
+            if not node.is_file():
+                raise ValueError("非普通文件")
+            return stat.st_size
+        if self._plugin._recent_days_protect > 0 and time.time() - path.stat().st_mtime < self._plugin._recent_days_protect * 86400:
+            raise ValueError("命中最近修改保护")
+        return measure(resolved)
+
     def delete_selected(self, selected: List[Dict[str, Any]], 
                         scan_paths: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
         """安全删除已选候选项（带重试机制）。只允许删除位于本次扫描路径下的文件/目录。"""
@@ -68,7 +99,7 @@ class DiskSpaceDeleter:
             path = Path(raw_path)
             try:
                 resolved = path.resolve(strict=False)
-                if not safe_roots or not any(DiskSpaceUtils.is_relative_to(resolved, root) for root in safe_roots):
+                if path.is_symlink() or not safe_roots or not any(resolved != root and DiskSpaceUtils.is_relative_to(resolved, root) for root in safe_roots):
                     msg = f"跳过不在扫描路径内的候选：{path}"
                     logger.warning(msg)
                     errors.append(msg)

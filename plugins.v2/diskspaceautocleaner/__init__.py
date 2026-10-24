@@ -23,7 +23,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.24"
+    plugin_version = "3.9.25"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -37,7 +37,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _path_mappings = ""
     _min_free_gb = 5
     _target_free_gb = 30
-    _scan_interval_minutes = 60
+    _scan_interval_minutes = 5
     _max_candidates = 30
     _max_scan_items = 5000
     _candidate_depth = 2
@@ -59,9 +59,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _media_server = ""
     _active_play_protect = True
     _recent_play_days = 7
-    _scan_cooldown_minutes = 360
-    _scan_backoff_multiplier = 2
-    _scan_backoff_max_minutes = 1440
     _tmdb_top_n = 30
     _prefer_release_year_lte = 0
     _prefer_release_year_bonus = 25
@@ -79,8 +76,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _timer: Optional[threading.Timer] = None
     _lock = threading.Lock()
     _check_running = False
-    _last_check_started_at = 0.0
-    _dedupe_window_seconds = 30
 
     def init_plugin(self, config: dict = None):
         triggered_immediate_run = False
@@ -94,7 +89,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._path_mappings = config.get("path_mappings") or ""
             self._min_free_gb = DiskSpaceUtils.to_int(config.get("min_free_gb"), 5)
             self._target_free_gb = DiskSpaceUtils.to_int(config.get("target_free_gb"), 30)
-            self._scan_interval_minutes = DiskSpaceUtils.to_int(config.get("scan_interval_minutes"), 60)
+            self._scan_interval_minutes = DiskSpaceUtils.to_int(config.get("scan_interval_minutes"), 5)
             self._max_candidates = DiskSpaceUtils.to_int(config.get("max_candidates"), 30)
             self._max_scan_items = DiskSpaceUtils.to_int(config.get("max_scan_items"), 5000)
             self._candidate_depth = DiskSpaceUtils.to_int(config.get("candidate_depth"), 2)
@@ -178,9 +173,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._media_server = config.get("media_server") or ""
             self._active_play_protect = DiskSpaceUtils.to_bool(config.get("active_play_protect"), True)
             self._recent_play_days = DiskSpaceUtils.to_int(config.get("recent_play_days"), 7)
-            self._scan_cooldown_minutes = DiskSpaceUtils.to_int(config.get("scan_cooldown_minutes"), 360)
-            self._scan_backoff_multiplier = max(1, DiskSpaceUtils.to_int(config.get("scan_backoff_multiplier"), 2))
-            self._scan_backoff_max_minutes = DiskSpaceUtils.to_int(config.get("scan_backoff_max_minutes"), 1440)
             self._tmdb_top_n = max(1, DiskSpaceUtils.to_int(config.get("tmdb_top_n"), 30))
             self._prefer_release_year_lte = max(0, DiskSpaceUtils.to_int(config.get("prefer_release_year_lte"), 0))
             self._prefer_release_year_bonus = DiskSpaceUtils.to_int(config.get("prefer_release_year_bonus"), 25)
@@ -274,9 +266,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 'candidate_depth': DiskSpaceUtils.to_int(item.get('candidate_depth'), self._candidate_depth),
                 'max_candidates': DiskSpaceUtils.to_int(item.get('max_candidates'), self._max_candidates),
                 'max_scan_items': DiskSpaceUtils.to_int(item.get('max_scan_items'), self._max_scan_items),
-                'scan_cooldown_minutes': DiskSpaceUtils.to_int(item.get('scan_cooldown_minutes'), self._scan_cooldown_minutes),
-                'scan_backoff_multiplier': max(1, DiskSpaceUtils.to_int(item.get('scan_backoff_multiplier'), self._scan_backoff_multiplier)),
-                'scan_backoff_max_minutes': DiskSpaceUtils.to_int(item.get('scan_backoff_max_minutes'), self._scan_backoff_max_minutes),
                 'tmdb_top_n': max(1, DiskSpaceUtils.to_int(item.get('tmdb_top_n'), self._tmdb_top_n)),
                 'prefer_release_year_lte': max(0, DiskSpaceUtils.to_int(item.get('prefer_release_year_lte'), self._prefer_release_year_lte)),
                 'prefer_release_year_bonus': DiskSpaceUtils.to_int(item.get('prefer_release_year_bonus'), self._prefer_release_year_bonus),
@@ -318,9 +307,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             'candidate_depth': self._candidate_depth,
             'max_candidates': self._max_candidates,
             'max_scan_items': self._max_scan_items,
-            'scan_cooldown_minutes': self._scan_cooldown_minutes,
-            'scan_backoff_multiplier': self._scan_backoff_multiplier,
-            'scan_backoff_max_minutes': self._scan_backoff_max_minutes,
             'tmdb_top_n': self._tmdb_top_n,
             'prefer_release_year_lte': self._prefer_release_year_lte,
             'prefer_release_year_bonus': self._prefer_release_year_bonus,
@@ -359,9 +345,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             '_candidate_depth': strategy.get('candidate_depth', self._candidate_depth),
             '_max_candidates': strategy.get('max_candidates', self._max_candidates),
             '_max_scan_items': strategy.get('max_scan_items', self._max_scan_items),
-            '_scan_cooldown_minutes': strategy.get('scan_cooldown_minutes', self._scan_cooldown_minutes),
-            '_scan_backoff_multiplier': strategy.get('scan_backoff_multiplier', self._scan_backoff_multiplier),
-            '_scan_backoff_max_minutes': strategy.get('scan_backoff_max_minutes', self._scan_backoff_max_minutes),
             '_tmdb_top_n': strategy.get('tmdb_top_n', self._tmdb_top_n),
             '_prefer_release_year_lte': strategy.get('prefer_release_year_lte', self._prefer_release_year_lte),
             '_prefer_release_year_bonus': strategy.get('prefer_release_year_bonus', self._prefer_release_year_bonus),
@@ -389,7 +372,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             f"candidate_depth={strategy.get('candidate_depth', '-') } | "
             f"max_candidates={strategy.get('max_candidates', '-') } | "
             f"max_scan_items={strategy.get('max_scan_items', '-') } | "
-            f"scan_cooldown_minutes={strategy.get('scan_cooldown_minutes', '-') } | "
             f"tmdb_top_n={strategy.get('tmdb_top_n', '-') } | "
             f"prefer_release_year_lte={strategy.get('prefer_release_year_lte', '-') } | "
             f"prefer_release_year_bonus={strategy.get('prefer_release_year_bonus', '-') } | "
@@ -458,7 +440,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if monitor_path:
                 lines.append(f"monitor_path={monitor_path}")
                 lines.append(f"monitor_paths={monitor_path}")
-            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "scan_cooldown_minutes", "scan_backoff_multiplier", "scan_backoff_max_minutes", "tmdb_top_n", "prefer_release_year_lte", "prefer_release_year_bonus"]:
+            for key in ["media_paths", "min_free_gb", "target_free_gb", "recent_days_protect", "recent_play_days", "max_delete_gb", "media_server", "candidate_depth", "max_candidates", "max_scan_items", "tmdb_top_n", "prefer_release_year_lte", "prefer_release_year_bonus"]:
                 value = config.get(prefix + key)
                 if value is None or str(value).strip() == "":
                     continue
@@ -502,9 +484,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "recent_days_protect": template["recent_days_protect"],
                 "recent_play_days": template["recent_play_days"],
                 "max_delete_gb": template["max_delete_gb"],
-                "scan_cooldown_minutes": self._scan_cooldown_minutes,
-                "scan_backoff_multiplier": self._scan_backoff_multiplier,
-                "scan_backoff_max_minutes": self._scan_backoff_max_minutes,
                 "tmdb_top_n": self._tmdb_top_n,
                 "prefer_release_year_lte": self._prefer_release_year_lte,
                 "prefer_release_year_bonus": self._prefer_release_year_bonus,
@@ -523,9 +502,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                     "recent_days_protect": item.get("recent_days_protect", base["recent_days_protect"]),
                     "recent_play_days": item.get("recent_play_days", base["recent_play_days"]),
                     "max_delete_gb": item.get("max_delete_gb", base["max_delete_gb"]),
-                    "scan_cooldown_minutes": item.get("scan_cooldown_minutes", base["scan_cooldown_minutes"]),
-                    "scan_backoff_multiplier": item.get("scan_backoff_multiplier", base["scan_backoff_multiplier"]),
-                    "scan_backoff_max_minutes": item.get("scan_backoff_max_minutes", base["scan_backoff_max_minutes"]),
                     "tmdb_top_n": item.get("tmdb_top_n", base["tmdb_top_n"]),
                     "prefer_release_year_lte": item.get("prefer_release_year_lte", base["prefer_release_year_lte"]),
                     "prefer_release_year_bonus": item.get("prefer_release_year_bonus", base["prefer_release_year_bonus"]),
@@ -562,9 +538,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_days_protect", "label": "最近新增保护天数", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VTextField", "props": {"model": prefix + "recent_play_days", "label": "最近播放降权天数", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "max_delete_gb", "label": "每次删除最大GB", "type": "number"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_cooldown_minutes", "label": "扫描冷却分钟", "type": "number", "hint": "持续低空间时，本策略两次候选扫描的最短间隔"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_multiplier", "label": "退避倍率", "type": "number", "hint": "连续低空间时，扫描冷却会按倍率递增"}}]},
-                                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "scan_backoff_max_minutes", "label": "最大退避分钟", "type": "number"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "tmdb_top_n", "label": "TMDB 精排前N项", "type": "number", "hint": "只对前 N 个初筛候选做 TMDB 评分修正"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "prefer_release_year_lte", "label": "优先删除上映年份≤", "type": "number", "hint": "命中上映年份小于等于该值的资源，会追加年份加分；包含该年份本身"}}]},
                                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": prefix + "prefer_release_year_bonus", "label": "年份优先加分", "type": "number", "hint": "命中上映年份阈值时，额外增加的删除优先分"}}]},
@@ -654,7 +627,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {"model": "scan_interval_minutes", "label": "检查间隔分钟", "type": "number", "placeholder": "60"}}]
+                                "content": [{"component": "VTextField", "props": {"model": "scan_interval_minutes", "label": "检查间隔分钟", "type": "number", "placeholder": "5", "hint": "默认5分钟仅检查空间，不足才扫描；已有60分钟配置保留，请自行调整。"}}]
                             },
                             {
                                 "component": "VCol",
@@ -690,9 +663,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             data[prefix + "recent_days_protect"] = strategy.get("recent_days_protect", self._recent_days_protect)
             data[prefix + "recent_play_days"] = strategy.get("recent_play_days", self._recent_play_days)
             data[prefix + "max_delete_gb"] = strategy.get("max_delete_gb", self._max_delete_gb)
-            data[prefix + "scan_cooldown_minutes"] = strategy.get("scan_cooldown_minutes", self._scan_cooldown_minutes)
-            data[prefix + "scan_backoff_multiplier"] = strategy.get("scan_backoff_multiplier", self._scan_backoff_multiplier)
-            data[prefix + "scan_backoff_max_minutes"] = strategy.get("scan_backoff_max_minutes", self._scan_backoff_max_minutes)
             data[prefix + "tmdb_top_n"] = strategy.get("tmdb_top_n", self._tmdb_top_n)
             data[prefix + "prefer_release_year_lte"] = strategy.get("prefer_release_year_lte", self._prefer_release_year_lte)
             data[prefix + "prefer_release_year_bonus"] = strategy.get("prefer_release_year_bonus", self._prefer_release_year_bonus)
@@ -1343,7 +1313,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     def _schedule_next(self, initial: bool = False):
         if not self._enabled:
             return
-        delay = 5 if initial else max(60, int(self._scan_interval_minutes or 60) * 60)
+        delay = 5 if initial else max(60, int(self._scan_interval_minutes or 5) * 60)
         timer = threading.Timer(delay, self._run_check)
         timer.daemon = True
         with self._lock:
@@ -1351,19 +1321,12 @@ class DiskSpaceAutoCleaner(_PluginBase):
         timer.start()
 
     def _run_check(self, schedule_next: bool = True, trigger: str = "scheduled"):
-        now = time.time()
         with self._lock:
             if self._check_running:
                 logger.info(f"硬盘空间自动清理已有检查正在进行，跳过本次{trigger}触发，避免重复扫盘")
                 should_run = False
-            elif self._last_check_started_at and now - self._last_check_started_at < self._dedupe_window_seconds:
-                logger.info(
-                    f"距离上次检查仅 {now - self._last_check_started_at:.1f} 秒，跳过本次{trigger}触发，避免重复扫盘"
-                )
-                should_run = False
             else:
                 self._check_running = True
-                self._last_check_started_at = now
                 should_run = True
 
         try:
@@ -1372,144 +1335,130 @@ class DiskSpaceAutoCleaner(_PluginBase):
         except Exception as e:
             logger.error(f"硬盘空间自动清理检查失败：{e}", exc_info=True)
         finally:
-            with self._lock:
-                self._check_running = False
+            if should_run:
+                with self._lock:
+                    self._check_running = False
             if schedule_next and self._enabled:
                 self._schedule_next(initial=False)
 
+    def _validate_cleanup_config(self):
+        if self._min_free_gb < 0 or self._target_free_gb <= self._min_free_gb:
+            raise ValueError("目标剩余空间必须大于触发阈值，触发阈值不得为负")
+        if self._max_delete_gb <= 0 or self._max_candidates <= 0 or self._max_scan_items <= 0:
+            raise ValueError("删除空间上限、候选数量上限及扫描上限必须为正数")
+
     def _check_space_and_report(self):
         if not self._enabled:
-            logger.info("硬盘空间自动清理插件未启用，跳过检查")
             return
-
-        monitor_paths = self._get_effective_monitor_paths()
-        if not monitor_paths:
-            logger.warning("硬盘空间自动清理未配置监控路径")
-            return
-
         scanner = DiskSpaceScanner(self)
         deleter = DiskSpaceDeleter(self)
         notifier = DiskSpaceNotifier(self)
-
-        for monitor in monitor_paths:
+        for monitor in self._get_effective_monitor_paths():
             mpath = Path(monitor)
-            if not mpath.exists():
-                logger.warning(f"监控路径不存在：{mpath}")
-                continue
-
-            strategy = self._resolve_strategy_for_monitor(mpath)
-            previous = self._apply_strategy_context(strategy)
+            previous = {}
+            free_gb = total_gb = free_percent = None
             try:
+                strategy = self._resolve_strategy_for_monitor(mpath)
+                previous = self._apply_strategy_context(strategy)
                 usage = shutil.disk_usage(mpath)
                 free_gb = usage.free / 1024 ** 3
                 total_gb = usage.total / 1024 ** 3
                 free_percent = usage.free / usage.total * 100 if usage.total else 0
-                logger.info(
-                    f"硬盘空间检查：{mpath} [{self._current_strategy_name}] 剩余 {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)，"
-                    f"触发阈值 {self._min_free_gb}GB，目标剩余 {self._target_free_gb}GB"
-                )
-                logger.info(f"策略实际生效参数：{self._strategy_effective_text(strategy)}")
-
+                self._validate_cleanup_config()
+                if free_gb > self._min_free_gb:
+                    continue  # Healthy disk: no media traversal.
                 scan_paths = strategy.get("media_paths") or scanner._media_paths_for_monitor(mpath)
-                if free_gb >= self._min_free_gb:
-                    self._mark_space_recovered(mpath)
-                    self._save_record(
-                        mpath,
-                        free_gb,
-                        total_gb,
-                        free_percent,
-                        [],
-                        f"空间充足：当前剩余 {free_gb:.1f}GB >= 触发阈值 {self._min_free_gb}GB，未生成清理建议",
-                        scan_paths,
-                        strategy_name=self._current_strategy_name,
-                    )
-                    continue
-
-                if self._should_skip_scan_for_cooldown(mpath):
-                    cooldown_text = self._cooldown_status_text(mpath)
-                    self._save_record(
-                        mpath,
-                        free_gb,
-                        total_gb,
-                        free_percent,
-                        [],
-                        f"空间不足，但处于扫描冷却期：{cooldown_text}",
-                        scan_paths,
-                        diagnosis={"scan_time_seconds": 0, "cooldown_active": True, "cooldown_text": cooldown_text},
-                        strategy_name=self._current_strategy_name,
-                    )
-                    continue
-
-                logger.info(
-                    f"空间不足，开始扫描候选：监控路径={mpath}，策略={self._current_strategy_name}，扫描路径={', '.join(scan_paths) or '未配置'}，"
-                    f"深度={self._candidate_depth}，最大条目={self._max_scan_items}，线程={self._scan_workers}"
-                )
-                needed_gb = max(0, self._target_free_gb - free_gb)
+                needed_gb = self._target_free_gb - free_gb
                 candidates, diagnosis = scanner.build_candidates(
-                    monitor_path=mpath,
-                    scan_paths=scan_paths,
-                    size_cache=self._size_cache,
-                    size_cache_lock=self._size_cache_lock,
-                    target_release_gb=needed_gb,
-                )
-                selected = self._select_candidates(candidates, needed_gb)
-                logger.info(
-                    f"空间不足：当前剩余 {free_gb:.1f}GB < 触发阈值 {self._min_free_gb}GB，"
-                    f"目标剩余 {self._target_free_gb}GB，需要释放约 {needed_gb:.1f}GB；"
-                    f"扫描候选 {len(candidates)} 项，选中 {len(selected)} 项"
-                )
-                if diagnosis:
-                    logger.info(
-                        f"扫描诊断：扫描耗时={diagnosis.get('scan_time_seconds', 0)}秒，"
-                        f"扫描目录={diagnosis.get('roots_scanned', 0)}，候选={diagnosis.get('candidates_found', 0)}，"
-                        f"跳过保护={diagnosis.get('protected_skipped', 0)}，跳过缺失={diagnosis.get('missing_skipped', 0)}，"
-                        f"跳过电视剧={diagnosis.get('series_skipped', 0)}，目标释放={diagnosis.get('target_release_gb', 0):.1f}GB"
-                    )
-                deleted, delete_errors = ([], [])
-
-                if selected and not self._dry_run:
-                    deleted, delete_errors = deleter.delete_selected(selected, scan_paths=scan_paths)
-                    selected_for_record = deleted
-                    summary = "空间不足，已执行自动清理" if deleted else "空间不足，但自动清理未成功；请查看错误日志"
-                    record_mode = "deleted" if deleted else "pending"
+                    monitor_path=mpath, scan_paths=scan_paths, size_cache=self._size_cache,
+                    size_cache_lock=self._size_cache_lock, target_release_gb=needed_gb)
+                deleted, delete_errors = [], []
+                after_gb = free_gb
+                if self._dry_run:
+                    selected = self._select_candidates(candidates, needed_gb)
+                    reason = "仅模拟，未删除；已生成建议" if selected else "仅模拟，未删除；无候选（保护/路径规则或上限限制）"
+                    result = {"attempted_count": 0, "charged_gb": 0}
                 else:
-                    selected_for_record = selected
-                    summary = "空间不足，已生成建议清理列表" if selected else "空间不足，但未找到符合条件的候选；请查看诊断信息"
-                    record_mode = "pending"
-
-                strategy_key = self._current_strategy_name or mpath.as_posix()
-                self._strategy_scan_totals[strategy_key] = max(0, int(self._strategy_scan_totals.get(strategy_key, 0) or 0)) + 1
-                self._mark_low_space_scan(mpath)
-                self._save_record(
-                    mpath,
-                    free_gb,
-                    total_gb,
-                    free_percent,
-                    selected_for_record,
-                    summary,
-                    scan_paths,
-                    diagnosis=diagnosis,
-                    all_candidates=candidates,
-                    strategy_name=self._current_strategy_name,
-                    record_mode=record_mode,
-                    deleted_candidates=deleted,
-                )
-
-                if not self._dry_run and deleted:
-                    notifier.notify_report(
-                        mpath,
-                        free_gb,
-                        total_gb,
-                        free_percent,
-                        deleted,
-                        needed_gb,
-                        scan_paths=scan_paths,
-                        diagnosis=diagnosis,
-                        delete_errors=delete_errors,
-                        strategy_name=self._current_strategy_name,
-                    )
+                    deleted, delete_errors, after_gb, reason, result = self._delete_until_target(
+                        mpath, candidates, scan_paths, free_gb, deleter)
+                    selected = deleted
+                diagnosis.update(result)
+                diagnosis.update({"before_free_gb": free_gb, "after_free_gb": after_gb,
+                                  "target_free_gb": self._target_free_gb,
+                                  "actual_change_gb": after_gb - free_gb, "stop_reason": reason,
+                                  "delete_errors": delete_errors, "dry_run": self._dry_run})
+                key = self._current_strategy_name or mpath.as_posix()
+                self._strategy_scan_totals[key] = int(self._strategy_scan_totals.get(key, 0) or 0) + 1
+                summary = notifier.outcome_text(diagnosis, deleted)
+                logger.info(summary) if self._dry_run or after_gb >= self._target_free_gb else logger.warning(summary)
+                self._save_record(mpath, free_gb, total_gb, free_percent, selected, summary,
+                                  scan_paths, diagnosis=diagnosis, all_candidates=candidates,
+                                  strategy_name=self._current_strategy_name,
+                                  record_mode="deleted" if deleted else "pending", deleted_candidates=deleted)
+                notifier.notify_report(mpath, free_gb, total_gb, free_percent, selected, needed_gb,
+                                       scan_paths=scan_paths, diagnosis=diagnosis,
+                                       delete_errors=delete_errors, strategy_name=self._current_strategy_name)
+            except Exception as e:
+                reason = f"检查/清理异常，已停止该盘：{e}"
+                logger.error(f"{mpath}: {reason}", exc_info=True)
+                diagnosis = {"before_free_gb": free_gb, "after_free_gb": None,
+                             "target_free_gb": self._target_free_gb, "actual_change_gb": None,
+                             "stop_reason": reason, "error": True, "dry_run": self._dry_run}
+                notifier.notify_report(mpath, free_gb, total_gb, free_percent, [], 0,
+                                       diagnosis=diagnosis, strategy_name=self._current_strategy_name)
             finally:
                 self._restore_strategy_context(previous)
+
+    def _delete_until_target(self, monitor_path, candidates, scan_paths, before_gb, deleter):
+        deleted, errors = [], []
+        charged_bytes = attempts = skipped = 0
+        after_gb = before_gb
+        budget_bytes = int(self._max_delete_gb * 1024 ** 3)
+        reason = "无候选（保护/路径规则过滤或扫描上限）"
+        for item in candidates:
+            if after_gb >= self._target_free_gb:
+                reason = "实际剩余空间已达目标"
+                break
+            if attempts >= self._max_candidates:
+                reason = "已达尝试数量上限，空间仍不足"
+                break
+            try:
+                size = deleter.measure_for_budget(item, scan_paths, monitor_path)
+            except Exception as e:
+                errors.append(f"保护/路径/大小复核跳过 {item.get('path')}: {e}")
+                skipped += 1
+                continue
+            if size <= 0 or charged_bytes + size > budget_bytes:
+                skipped += 1
+                continue
+            # Charge full uncached size BEFORE attempting. Failed/partial removals
+            # never refund budget or candidate slots.
+            charged_bytes += size
+            attempts += 1
+            try:
+                done, item_errors = deleter.delete_selected([item], scan_paths=scan_paths)
+                deleted.extend(done)
+                errors.extend(item_errors)
+            except Exception as e:
+                errors.append(f"删除失败 {item.get('path')}: {e}")
+            # A failed removal may still release space; an unreadable disk stops
+            # this disk rather than continuing without feedback.
+            after_gb = shutil.disk_usage(monitor_path).free / 1024 ** 3
+            if after_gb >= self._target_free_gb:
+                reason = "实际剩余空间已达目标"
+                break
+            reason = "候选耗尽，空间仍不足"
+        if after_gb < self._target_free_gb:
+            if attempts >= self._max_candidates or charged_bytes >= budget_bytes:
+                reason = "已达累计删除/尝试数量上限，空间仍不足"
+            elif skipped:
+                reason = "保护/路径规则或累计删除上限限制，空间仍不足"
+            if errors:
+                reason += f"；删除失败/复核跳过 {len(errors)}项"
+            if attempts and after_gb - before_gb < 0.01:
+                reason += "；删除尝试后空间未明显增加（硬链接/快照/占用或删除失败）"
+        return deleted, errors, after_gb, reason, {"attempted_count": attempts,
+                "charged_gb": charged_bytes / 1024 ** 3, "limit_skipped": skipped}
 
     def _select_candidates(self, candidates: List[Dict[str, Any]], needed_gb: float) -> List[Dict[str, Any]]:
         selected = []
@@ -1744,50 +1693,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
             entry = {}
             self._scan_state[key] = entry
         return entry
-
-    def _compute_scan_cooldown_minutes(self, entry: Dict[str, Any]) -> int:
-        base = max(0, int(self._scan_cooldown_minutes or 0))
-        multiplier = max(1, int(self._scan_backoff_multiplier or 1))
-        max_minutes = max(base, int(self._scan_backoff_max_minutes or base or 0))
-        streak = max(1, int(entry.get("low_space_scan_streak") or 1))
-        cooldown = base * (multiplier ** max(0, streak - 1)) if base > 0 else 0
-        if max_minutes > 0:
-            cooldown = min(cooldown, max_minutes)
-        return int(cooldown)
-
-    def _should_skip_scan_for_cooldown(self, monitor_path: Path) -> bool:
-        entry = self._get_scan_state_entry(monitor_path)
-        next_allowed = float(entry.get("next_allowed_scan_at") or 0)
-        return next_allowed > time.time()
-
-    def _cooldown_status_text(self, monitor_path: Path) -> str:
-        entry = self._get_scan_state_entry(monitor_path)
-        next_allowed = float(entry.get("next_allowed_scan_at") or 0)
-        remaining = max(0, int(next_allowed - time.time()))
-        cooldown = int(entry.get("last_cooldown_minutes") or 0)
-        streak = int(entry.get("low_space_scan_streak") or 0)
-        if remaining <= 0:
-            return "冷却已结束"
-        minutes, seconds = divmod(remaining, 60)
-        return f"剩余 {minutes}分{seconds}秒（连续低空间扫描 {streak} 次，本轮冷却 {cooldown} 分钟）"
-
-    def _mark_space_recovered(self, monitor_path: Path):
-        entry = self._get_scan_state_entry(monitor_path)
-        entry.update({
-            "low_space_scan_streak": 0,
-            "next_allowed_scan_at": 0,
-            "last_cooldown_minutes": 0,
-            "last_recovered_at": time.time(),
-        })
-
-    def _mark_low_space_scan(self, monitor_path: Path):
-        entry = self._get_scan_state_entry(monitor_path)
-        streak = max(0, int(entry.get("low_space_scan_streak") or 0)) + 1
-        entry["low_space_scan_streak"] = streak
-        entry["last_low_space_scan_at"] = time.time()
-        cooldown = self._compute_scan_cooldown_minutes(entry)
-        entry["last_cooldown_minutes"] = cooldown
-        entry["next_allowed_scan_at"] = time.time() + cooldown * 60 if cooldown > 0 else 0
 
     def _save_record(self, monitor_path: Path, free_gb: float, total_gb: float, free_percent: float,
                      selected: List[Dict[str, Any]], summary: str, scan_paths: Optional[List[str]] = None,

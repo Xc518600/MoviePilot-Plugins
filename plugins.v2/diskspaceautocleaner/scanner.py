@@ -279,11 +279,6 @@ class DiskSpaceScanner:
                         f"初筛分={score:.2f}，活跃度={recent_match_reason or '未命中'}"
                     )
 
-                    if stop_event and shared_state is not None:
-                        with shared_state["lock"]:
-                            shared_state["candidates"].append(candidates[-1])
-                            if self._should_early_stop(shared_state["candidates"], target_release_gb):
-                                stop_event.set()
                 except Exception as e:
                     diagnosis["error_skipped"] += 1
                     logger.warning(f"扫描候选失败 {child}: {e}")
@@ -542,31 +537,6 @@ class DiskSpaceScanner:
                 2,
             )
 
-    def _should_early_stop(self, candidates: List[Dict[str, Any]], target_release_gb: float) -> bool:
-        needed = float(target_release_gb or 0)
-        if needed <= 0:
-            return False
-
-        # 保守早停：候选样本足够多，且当前高分候选已明显超过目标+冗余时才停止
-        min_sample = max(20, int(getattr(self._plugin, "_max_candidates", 30) or 30) * 2)
-        if len(candidates) < min_sample:
-            return False
-
-        ranked = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
-        selected = self._plugin._select_candidates(ranked, needed)
-        if not selected:
-            return False
-
-        selected_total = sum(float(item.get("size_gb") or 0) for item in selected)
-        margin_gb = max(10.0, needed * 0.2)
-        if selected_total < needed + margin_gb:
-            return False
-
-        # 还要确认当前已抓到的前列候选足够“密”，避免太早停掉后面更好的大项
-        top_bucket = ranked[:max(10, int(getattr(self._plugin, "_max_candidates", 30) or 30))]
-        top_bucket_total = sum(float(item.get("size_gb") or 0) for item in top_bucket)
-        return top_bucket_total >= needed + margin_gb
-    
     def _iter_candidate_items(self, root: Path, depth: int):
         """智能扫描候选（使用迭代替代递归，避免递归深度限制）：
         - 电视剧根目录：只扫描第一级子目录（剧集名），避免删除单季导致缺集

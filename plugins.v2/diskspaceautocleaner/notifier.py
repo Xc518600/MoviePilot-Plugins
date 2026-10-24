@@ -20,50 +20,44 @@ class DiskSpaceNotifier:
         """发送清理报告（按策略区分）。"""
         if not self._plugin._notify:
             return
-        reclaim_gb = sum(float(x.get("size_gb") or 0) for x in selected)
-
-        if not selected:
-            # 没有候选删除项，发送空间不足但无候选的通知（精简版）
-            lines = [
-                "📊 硬盘空间自动清理",
-                f"剩余空间: {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)",
-                f"目标还需释放: {needed_gb:.1f}GB",
-                "",
-                "⚠️ 未找到符合条件的删除候选",
-            ]
-        else:
-            # 有候选删除项，发送精简的删除/建议通知
-            lines = ["📊 硬盘空间自动清理"]
-            
-            lines.append(f"剩余空间: {free_gb:.1f}GB / {total_gb:.1f}GB ({free_percent:.1f}%)")
-            lines.append(f"目标还需释放: {needed_gb:.1f}GB")
-            lines.append("")
-            
-            # 按类型分组候选项（只显示统计，不列明细）
-            grouped = self.group_candidates(selected)
-            
-            for category_type, category_info in grouped.items():
-                icon = category_info.get("icon", "📁")
-                type_name = category_info.get("name", category_type)
-                count = category_info.get("count", 0)
-                total_size_gb = category_info.get("total_size_gb", 0)
-                
-                if count > 0:
-                    lines.append(f"{icon} {type_name}: {count}部 共{total_size_gb:.1f}GB")
-            
-            lines.append("")
-            lines.append(f"💰 总计释放: {reclaim_gb:.1f}GB")
-            
-            if delete_errors:
-                lines.append(f"⚠️ 删除失败: {len(delete_errors)}项")
-            
-            lines.append("💡 本次仅生成报告" if self._plugin._dry_run else "✅ 已执行清理")
-
+        diagnosis = diagnosis or {}
+        text = self.outcome_text(diagnosis, selected)
+        entry = self._plugin._get_scan_state_entry(monitor_path)
+        # Dedupe is deliberately notification-only; scanning/deletion already ran.
+        fingerprint = (bool(diagnosis.get("dry_run")), bool(diagnosis.get("error")),
+                       diagnosis.get("stop_reason"), bool(delete_errors))
+        import time
+        if entry.get("notification_fingerprint") == list(fingerprint) and time.time() - float(entry.get("notification_at") or 0) < 3600:
+            return
         try:
-            self._plugin.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理", text="\n".join(lines))
+            self._plugin.post_message(mtype=NotificationType.Plugin, title="硬盘空间自动清理",
+                                      text=f"策略：{strategy_name or monitor_path}\n监控路径：{monitor_path}\n{text}\n{self.diagnosis_text(diagnosis)}")
+            entry.update(notification_fingerprint=list(fingerprint), notification_at=time.time())
+            self._plugin._persist_config()
         except Exception as e:
             logger.warning(f"发送硬盘空间自动清理通知失败:{e}")
-    
+
+    @staticmethod
+    def outcome_text(diagnosis, selected):
+        def space(value):
+            return "未知" if value is None else f"{value:.2f}GB"
+        before = diagnosis.get("before_free_gb")
+        after = diagnosis.get("after_free_gb")
+        target = diagnosis.get("target_free_gb")
+        if diagnosis.get("error"):
+            status = "⚠️ 检查/清理异常"
+        elif diagnosis.get("dry_run"):
+            status = "💡 模拟报告（未删除，不代表已释放空间）"
+        elif after is not None and target is not None and after >= target:
+            status = "✅ 实际空间已达目标"
+        else:
+            status = "⚠️ 清理后空间仍不足，需要处理"
+        return (f"{status}\n清理前剩余：{space(before)}；清理后剩余：{space(after)}；目标：{space(target)}"
+                f"\n实际空间变化：{space(diagnosis.get('actual_change_gb'))}；"
+                f"{'建议' if diagnosis.get('dry_run') else '成功删除'}：{len(selected)}项"
+                f"\n停止原因：{diagnosis.get('stop_reason', '未知')}"
+                f"\n删除失败/复核跳过：{len(diagnosis.get('delete_errors') or [])}项")
+
     def group_candidates(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """将候选项按类型分组（电影、电视剧、其他）。"""
         grouped = {
