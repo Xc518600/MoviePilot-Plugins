@@ -224,6 +224,37 @@ class CleanerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 deleter.measure_for_budget(candidate(1), ['/mock/media'], Path('/mock'))
 
+    def test_recursive_recent_file_blocks_ancestor_deletion(self):
+        from cleaner_under_test.deleter import DiskSpaceDeleter
+        deleter = DiskSpaceDeleter(self.p)
+        self.p._recent_days_protect = 30
+        import time as _time
+        now = _time.time()
+        directory = Path('/mock/media/title')
+        old_file = directory / 'old.mkv'
+        new_file = directory / 'new.mkv'
+        files = [old_file, new_file]
+        def stat(node):
+            mtime = now - 90 * 86400 if node in (directory, old_file) else now - 86400
+            return types.SimpleNamespace(st_dev=7, st_size=10, st_mtime=mtime)
+        with patch.object(Path, 'resolve', lambda node, **kw: node), \
+             patch.object(Path, 'is_symlink', return_value=False), \
+             patch.object(Path, 'stat', stat), patch.object(Path, 'lstat', stat), \
+             patch.object(Path, 'is_dir', lambda node: node == directory), \
+             patch.object(Path, 'is_file', lambda node: node in files), \
+             patch.object(Path, 'iterdir', return_value=iter(files)):
+            with self.assertRaises(ValueError):
+                deleter.measure_for_budget({'path': str(directory)}, ['/mock/media'], Path('/mock'))
+
+    def test_merged_tmdb_rating_cache_prunes_expired(self):
+        import time
+        now = time.time()
+        fresh = {'cache_time': now - 100, 'value': {'rating': 8.0}}
+        stale = {'cache_time': now - 40 * 86400, 'value': None}
+        self.p._tmdb_rating_cache = {'fresh': fresh, 'stale': stale}
+        merged = self.p._merged_tmdb_rating_cache({'p-fresh': fresh, 'p-stale': stale})
+        self.assertEqual(sorted(merged), ['fresh', 'p-fresh'])
+
     def test_repeated_actual_lock_contention_keeps_owner(self):
         entered, release = threading.Event(), threading.Event()
         def blocking_check():

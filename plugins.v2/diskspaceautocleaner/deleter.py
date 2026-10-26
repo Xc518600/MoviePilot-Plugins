@@ -42,9 +42,11 @@ class DiskSpaceDeleter:
             
             with size_cache_lock:
                 size_cache[cache_key] = (size, time.time())
-                # 缓存超过100个时清理旧的
-                if len(size_cache) > 100:
-                    size_cache.clear()
+                # 超上限时淘汰最旧的一半而不是整体清空，保留扫描阶段已有的缓存成果
+                if len(size_cache) > 500:
+                    ordered = sorted(size_cache.items(), key=lambda kv: kv[1][1] if isinstance(kv[1], tuple) else 0)
+                    for stale_key, _ in ordered[: len(ordered) // 2]:
+                        size_cache.pop(stale_key, None)
             
             return size
         except Exception:
@@ -78,6 +80,8 @@ class DiskSpaceDeleter:
                 raise ValueError("符号链接或跨盘/挂载点")
             if not DiskSpaceUtils.is_safe_root(node, protect, keywords):
                 raise ValueError("命中保护路径/关键词")
+            if protect_days > 0 and measure_now - stat.st_mtime < protect_days * 86400:
+                raise ValueError("命中最近修改保护（递归子项）")
             if node.is_dir():
                 # Protect descendants too: deleting an ancestor must not bypass
                 # protected subdirectories or recent-file protection.
@@ -91,6 +95,8 @@ class DiskSpaceDeleter:
             protect_days = int(getattr(self._plugin, "_fallback_min_keep_days", protect_days))
         if protect_days > 0 and time.time() - path.stat().st_mtime < protect_days * 86400:
             raise ValueError("命中最近修改保护")
+        # 递归内逐文件复查 mtime：顶层目录 mtime 旧不代表子文件没被近期改动过。
+        measure_now = time.time()
         return measure(resolved)
 
     def delete_selected(self, selected: List[Dict[str, Any]], 

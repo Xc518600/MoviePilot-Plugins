@@ -24,7 +24,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.27"
+    plugin_version = "3.9.28"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -70,7 +70,6 @@ class DiskSpaceAutoCleaner(_PluginBase):
     _current_strategy_name = ""
     _run_once = False
     _tmdb_rating_cache: Dict[str, Dict[str, Any]] = {}
-    _poster_cache: Dict[str, Optional[str]] = {}
     _blank_poster = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAACWCAQAAACCseXNAAAAkklEQVR42u3PAREAAAQEMJ9cFFUVkMBtDZbpeiEiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIpcFcbGoK4SMl3wAAAAASUVORK5CYII="
 
     _size_cache: Dict[str, int] = {}
@@ -117,6 +116,17 @@ class DiskSpaceAutoCleaner(_PluginBase):
             self._strategy_deleted_totals = strategy_deleted_totals if isinstance(strategy_deleted_totals, dict) else {}
             strategy_deleted_gb_totals = config.get("strategy_deleted_gb_totals") or {}
             self._strategy_deleted_gb_totals = strategy_deleted_gb_totals if isinstance(strategy_deleted_gb_totals, dict) else {}
+            self._scan_workers = max(1, DiskSpaceUtils.to_int(config.get("scan_workers"), 4))
+            persisted_rating_cache = config.get("tmdb_rating_cache")
+            if isinstance(persisted_rating_cache, dict):
+                now_ts = time.time()
+                self._tmdb_rating_cache = {
+                    str(key): entry
+                    for key, entry in persisted_rating_cache.items()
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("cache_time"), (int, float))
+                    and 0 <= now_ts - float(entry["cache_time"]) < 30 * 86400
+                }
             if not self._deleted_history and self._history:
                 migrated_deleted_history: List[Dict[str, Any]] = []
                 for record in self._history:
@@ -654,6 +664,11 @@ class DiskSpaceAutoCleaner(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VTextField", "props": {"model": "scan_workers", "label": "扫描线程数", "type": "number", "placeholder": "4", "hint": "扫描媒体库时的并发线程数，默认4。"}}]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VTextField", "props": {"model": "history_limit", "label": "历史记录保留条数", "type": "number", "placeholder": "50"}}]
                             },
                         ]
@@ -670,6 +685,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
             "run_once": False,
             "scan_interval_minutes": self._scan_interval_minutes,
             "history_limit": self._history_limit,
+            "scan_workers": self._scan_workers,
             "history": self._history,
             "scan_state": self._scan_state,
             "strategy_profiles": self._strategy_profiles,
@@ -1705,10 +1721,33 @@ class DiskSpaceAutoCleaner(_PluginBase):
                 "strategy_deleted_totals": merged_strategy_deleted_totals,
                 "strategy_deleted_gb_totals": merged_strategy_deleted_gb_totals,
                 "scan_state": self._scan_state,
+                "tmdb_rating_cache": self._merged_tmdb_rating_cache(config.get("tmdb_rating_cache")),
             })
             self.update_config(config)
         except Exception as e:
             logger.warning(f"保存硬盘空间自动清理运行状态失败：{e}")
+
+    def _merged_tmdb_rating_cache(self, persisted: Any) -> Dict[str, Dict[str, Any]]:
+        """合并内存与已持久化的 TMDB 评分缓存，惰性丢弃过期项并限制规模。"""
+        now_ts = time.time()
+
+        def _valid(entry: Any) -> bool:
+            return (isinstance(entry, dict)
+                    and isinstance(entry.get("cache_time"), (int, float))
+                    and 0 <= now_ts - float(entry["cache_time"]) < 30 * 86400)
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        if isinstance(persisted, dict):
+            for key, entry in persisted.items():
+                if _valid(entry):
+                    merged[str(key)] = entry
+        for key, entry in (self._tmdb_rating_cache or {}).items():
+            if _valid(entry):
+                merged[str(key)] = entry
+        if len(merged) > 1000:
+            ordered = sorted(merged.items(), key=lambda kv: float(kv[1].get("cache_time") or 0), reverse=True)
+            merged = dict(ordered[:1000])
+        return merged
 
     def _build_deleted_history_from_logs(self, existing: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         merged: List[Dict[str, Any]] = []

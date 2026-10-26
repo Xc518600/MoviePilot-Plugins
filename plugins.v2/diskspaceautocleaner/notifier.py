@@ -1,4 +1,5 @@
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +28,6 @@ class DiskSpaceNotifier:
         # Dedupe is deliberately notification-only; scanning/deletion already ran.
         fingerprint = (bool(diagnosis.get("dry_run")), bool(diagnosis.get("error")),
                        diagnosis.get("stop_reason"), bool(delete_errors))
-        import time
         if entry.get("notification_fingerprint") == list(fingerprint) and time.time() - float(entry.get("notification_at") or 0) < 3600:
             return
         try:

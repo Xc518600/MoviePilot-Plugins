@@ -65,7 +65,6 @@ class DiskSpaceScanner:
             f"最大条目={max_items}，线程={self._plugin._scan_workers}"
         )
 
-        stop_event = threading.Event()
         shared_state = {
             "candidates": [],
             "items_reserved": 0,
@@ -78,7 +77,7 @@ class DiskSpaceScanner:
                 executor.submit(self._scan_media_root, root, depth, now, recent_seconds,
                                max_items, protect_dirs, protect_keywords,
                                size_cache, size_cache_lock, target_release_gb, active_titles, recent_titles,
-                               stop_event, shared_state): root
+                               shared_state): root
                 for root in media_paths
             }
             
@@ -110,7 +109,6 @@ class DiskSpaceScanner:
         
         scan_time = time.time() - scan_start_time
         diagnosis["scan_time_seconds"] = round(scan_time, 2)
-        diagnosis["early_stop_triggered"] = stop_event.is_set()
 
         self._apply_tmdb_rerank(candidates, diagnosis)
 
@@ -132,7 +130,6 @@ class DiskSpaceScanner:
                          size_cache: Dict[str, int], size_cache_lock: threading.Lock,
                          target_release_gb: float = 0, active_titles: Optional[Set[str]] = None,
                          recent_titles: Optional[Set[str]] = None,
-                         stop_event: Optional[threading.Event] = None,
                          shared_state: Optional[Dict[str, Any]] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """扫描单个媒体根目录（线程安全）。"""
         root = Path(root)
@@ -182,9 +179,6 @@ class DiskSpaceScanner:
                 except OSError:
                     return False
             for child in sorted(discovered, key=priority):
-                if stop_event and stop_event.is_set():
-                    logger.info(f"提前停止扫描媒体根目录：{root}（已满足目标释放量）")
-                    break
                 diagnosis["items_scanned"] += 1
                 
                 if diagnosis["items_scanned"] > max_items:
