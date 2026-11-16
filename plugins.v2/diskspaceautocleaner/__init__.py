@@ -24,7 +24,7 @@ class DiskSpaceAutoCleaner(_PluginBase):
     plugin_name = "硬盘空间自动清理"
     plugin_desc = "监控指定硬盘剩余空间，空间不足时按单盘策略扫描媒体库并生成清理建议。"
     plugin_icon = "harddisk.png"
-    plugin_version = "3.9.28"
+    plugin_version = "3.9.29"
     plugin_author = "老公"
     author_url = ""
     plugin_config_prefix = "diskspaceautocleaner_"
@@ -763,6 +763,38 @@ class DiskSpaceAutoCleaner(_PluginBase):
             if self._build_deleted_candidates(item):
                 latest_deleted_by_strategy[strategy_name] = item
 
+        # 兼容：history 只保留最近 history_limit 条，早期策略会被挤出窗口，
+        # 但其累计数据仍持久化在 strategy_*_totals 中。这里把这类策略补回来，
+        # 否则「策略统计」面板会整张卡片消失（例如硬盘3）。
+        persisted_strategy_names = self._persisted_strategy_names()
+        if persisted_strategy_names:
+            profile_map = {
+                str(profile.get("name") or "").strip(): profile
+                for profile in self._parse_strategy_profiles()
+                if str(profile.get("name") or "").strip()
+            }
+            for persisted_name in persisted_strategy_names:
+                if persisted_name in seen:
+                    continue
+                seen.add(persisted_name)
+                profile = profile_map.get(persisted_name) or {}
+                last_deleted_time = "-"
+                for entry in deleted_history or []:
+                    if (entry.get("strategy_name") or "") != persisted_name:
+                        continue
+                    last_deleted_time = entry.get("record_time") or "-"
+                    break
+                latest_by_strategy.append({
+                    "time": last_deleted_time,
+                    "monitor_path": profile.get("monitor_path") or "-",
+                    "strategy_name": persisted_name,
+                    "free_text": "历史记录已滚出保留窗口",
+                    "summary": "历史扫描记录已滚出保留窗口，累计数据取自持久化统计",
+                    "candidates": [],
+                    "deleted_candidates": [],
+                    "pending_candidates": [],
+                })
+
         latest_strategy_map: Dict[str, Dict[str, Any]] = {
             (item.get("strategy_name") or item.get("monitor_path") or "默认策略"): item
             for item in latest_by_strategy
@@ -1112,6 +1144,13 @@ class DiskSpaceAutoCleaner(_PluginBase):
             item["latest_free_text"] = latest.get("free_text") or "-"
             item["latest_summary"] = latest.get("summary") or "-"
 
+        for persisted_name in self._persisted_strategy_names():
+            totals.setdefault(persisted_name, {
+                "deleted_count": 0,
+                "deleted_gb": 0.0,
+                "scan_count": 0,
+            })
+
         for strategy_name, item in totals.items():
             persisted_scan_count = max(0, DiskSpaceUtils.to_int((self._strategy_scan_totals or {}).get(strategy_name), 0))
             item["scan_count"] = max(int(item.get("scan_count") or 0), persisted_scan_count)
@@ -1120,6 +1159,20 @@ class DiskSpaceAutoCleaner(_PluginBase):
             item["deleted_count"] = max(int(item.get("deleted_count") or 0), persisted_deleted_count)
             item["deleted_gb"] = max(float(item.get("deleted_gb") or 0), persisted_deleted_gb)
         return totals
+
+    def _persisted_strategy_names(self) -> List[str]:
+        """汇总持久化统计中出现过的策略名（history 窗口丢失后仍可作为统计来源）。"""
+        names: List[str] = []
+        for source in (
+            self._strategy_scan_totals or {},
+            self._strategy_deleted_totals or {},
+            self._strategy_deleted_gb_totals or {},
+        ):
+            for key in (source or {}).keys():
+                key = str(key or "").strip()
+                if key and key not in names:
+                    names.append(key)
+        return names
 
     @staticmethod
     def _format_size_text(size_gb: float) -> str:

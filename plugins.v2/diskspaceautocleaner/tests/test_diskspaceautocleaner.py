@@ -722,3 +722,124 @@ class PushPresentationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StrategySummaryPanelTests(unittest.TestCase):
+    """策略统计面板必须覆盖「history 窗口已滚出、但持久化统计仍有数据」的策略。"""
+
+    def setUp(self):
+        self.p = module.DiskSpaceAutoCleaner()
+        self.p._history_limit = 50
+        self.p._deleted_history_limit = 200
+        self.p._history = [{
+            "time": "2026-11-17 04:47:41",
+            "monitor_path": "/mock/disk4",
+            "strategy_name": "硬盘4-国产电视剧",
+            "free_gb": 6.1,
+            "total_gb": 3725.9,
+            "free_percent": 0.2,
+            "free_text": "6.1GB / 3725.9GB (0.2%)",
+            "summary": "空间仍不足",
+            "deleted_candidates": [],
+            "candidates": [],
+        }]
+        self.p._deleted_history = [{
+            "record_time": "2026-11-10 21:01:12",
+            "monitor_path": "/mock/disk3",
+            "strategy_name": "硬盘3-外语电影",
+            "name": "医到孤岛爱上你 (2026)",
+            "size_gb": 21.5,
+        }]
+        self.p._strategy_scan_totals = {"硬盘4-国产电视剧": 96, "硬盘3-外语电影": 20}
+        self.p._strategy_deleted_totals = {"硬盘4-国产电视剧": 83, "硬盘3-外语电影": 38}
+        self.p._strategy_deleted_gb_totals = {"硬盘4-国产电视剧": 2488.32, "硬盘3-外语电影": 1320.76}
+        self.p._historical_deleted_count_total = 121
+        self.p._historical_deleted_gb_total = 3809.08
+
+    @classmethod
+    def _all_text(cls, node):
+        """按文档顺序收集某个组件子树内的全部文本。"""
+        texts = []
+        for cell in (node if isinstance(node, list) else [node]):
+            if isinstance(cell, dict):
+                if cell.get("text"):
+                    texts.append(str(cell["text"]))
+                if cell.get("content"):
+                    texts.extend(cls._all_text(cell["content"]))
+            elif isinstance(cell, list):
+                texts.extend(cls._all_text(cell))
+        return texts
+
+    @classmethod
+    def _summary_metrics(cls, page):
+        """取出「策略统计」面板内每张策略卡片的首个文本（即策略名）。"""
+        names, stack = [], [page]
+        panels = []
+        while stack:
+            node = stack.pop(0)
+            if isinstance(node, dict):
+                if node.get("component") == "VCard":
+                    texts = cls._all_text(node.get("content") or [])
+                    if "策略统计" in texts and "历史总计" not in texts:
+                        panels.append(node)
+                        continue
+                stack.extend(node.get("content") or [])
+            elif isinstance(node, list):
+                stack.extend(node)
+
+        for panel in panels:
+            for row in cls._find_all(panel, "VRow"):
+                for col in cls._find_all(row, "VCol"):
+                    for card in cls._find_all(col, "VCard"):
+                        texts = cls._all_text(card.get("content") or [])
+                        if texts:
+                            names.append(texts)
+        return names
+
+    @classmethod
+    def _find_all(cls, node, component):
+        found = []
+        for cell in (node if isinstance(node, list) else [node]):
+            if isinstance(cell, dict):
+                if cell.get("component") == component:
+                    found.append(cell)
+                if cell.get("content"):
+                    found.extend(cls._find_all(cell["content"], component))
+            elif isinstance(cell, list):
+                found.extend(cls._find_all(cell, component))
+        return found
+
+    def test_strategy_missing_from_history_still_gets_a_card(self):
+        page = self.p.get_page()
+        names = [divs[0] for divs in self._summary_metrics(page)]
+        self.assertIn("硬盘4-国产电视剧", names)
+        self.assertIn(
+            "硬盘3-外语电影", names,
+            "history 中没有该策略时，持久化统计里的策略也必须出现在策略统计面板",
+        )
+
+    def test_persisted_totals_survive_without_history_record(self):
+        page = self.p.get_page()
+        metrics = {texts[0]: texts for texts in self._summary_metrics(page)}
+        disk3 = metrics["硬盘3-外语电影"]
+        self.assertIn("38", disk3, "累计删除数应取自 strategy_deleted_totals")
+        self.assertTrue(
+            any("1.29TB" in text for text in disk3),
+            "累计释放量应取自 strategy_deleted_gb_totals，实际: %r" % (disk3,),
+        )
+        self.assertTrue(
+            any("扫描 20 次" in text for text in disk3),
+            "扫描次数应取自 strategy_scan_totals，实际: %r" % (disk3,),
+        )
+
+    def test_persisted_strategy_names_merges_all_sources(self):
+        names = self.p._persisted_strategy_names()
+        self.assertIn("硬盘3-外语电影", names)
+        self.assertIn("硬盘4-国产电视剧", names)
+        self.assertEqual(len(names), len(set(names)), "策略名不应重复")
+
+    def test_persisted_strategy_names_tolerates_empty_state(self):
+        self.p._strategy_scan_totals = {}
+        self.p._strategy_deleted_totals = {}
+        self.p._strategy_deleted_gb_totals = {}
+        self.assertEqual(self.p._persisted_strategy_names(), [])

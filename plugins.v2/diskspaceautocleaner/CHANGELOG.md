@@ -1,3 +1,9 @@
+# 3.9.29
+
+- 修复「策略统计」面板丢失策略卡片：某策略的扫描记录滚动超出 `history_limit` 保留窗口后，其累计数据仍保存在持久化统计中，但面板遍历的是 history 去重结果，导致整张卡片消失（例如硬盘3-外语电影 累计 38 项 / 1.29TB 完全不可见）。
+- 新增 `_persisted_strategy_names()` 汇总 `strategy_scan_totals` / `strategy_deleted_totals` / `strategy_deleted_gb_totals` 的键，并在构造统计项与累计数据时补入 history 中已不存在的策略。
+- 仅影响统计面板展示，不改变扫描、候选筛选、删除与通知逻辑。
+
 # 3.9.28
 
 - 修复删除安全缺口：measure_for_budget 递归时对每个文件复查最近修改保护，旧目录内近期新增的文件不再被连带删除。
